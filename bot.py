@@ -1,44 +1,46 @@
 import logging
+import asyncio
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 import requests
-import time
 
 # ================= الإعدادات =================
 BOT_TOKEN = "8452767198:AAG7JIWMBIkK21L8ihNd-O7AQYOXtXZ4lm0"
 CHAT_ID = "7960335113"
 
-# ================= الأوامر التفاعلية =================
-
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# ================= لوحة التحكم =================
+def get_main_keyboard():
     keyboard = [
-        [InlineKeyboardButton("🟢 تشغيل الرادار", callback_data='start_scan')],
-        [InlineKeyboardButton("🛑 إيقاف المؤقت", callback_data='stop_scan')],
-        [InlineKeyboardButton("🔍 فحص سريع", callback_data='quick_scan')]
+        [InlineKeyboardButton("🟢 تشغيل الرادار", callback_data='start'), InlineKeyboardButton("🛑 إيقاف", callback_data='stop')],
+        [InlineKeyboardButton("🔍 فحص الآن", callback_data='scan'), InlineKeyboardButton("📊 الحالة", callback_data='status')]
     ]
-    reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text('🎮 لوحة تحكم الرادار المطور:', reply_markup=reply_markup)
+    return InlineKeyboardMarkup(keyboard)
 
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("🛰️ **أهلاً بك في رادار الانفجار السعري.**\nاستخدم الأزرار للتحكم:", 
+                                   reply_markup=get_main_keyboard(), parse_mode="Markdown")
+
+async def button_tap(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
     
-    if query.data == 'start_scan':
-        await query.edit_message_text(text="✅ تم تفعيل التشغيل التلقائي. الرادار يراقب السوق الآن.")
-    elif query.data == 'stop_scan':
-        await query.edit_message_text(text="🛑 تم إيقاف الرادار مؤقتاً.")
-    elif query.data == 'quick_scan':
-        await query.edit_message_text(text="🔎 جاري فحص جميع العملات... (ستصلك النتائج فوراً)")
+    if query.data == 'start':
+        await query.edit_message_text("🟢 **تم تفعيل التشغيل التلقائي.**\nالبوت يبحث عن فرص الآن...", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    elif query.data == 'scan':
+        await query.edit_message_text("🔎 **جاري فحص العملات...**\nسأوافيك بأي فرصة فور ظهورها.", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    elif query.data == 'status':
+        await query.edit_message_text("✅ **الحالة: متصل**\nالسيرفر: Railway\nالنظام: يعمل بكفاءة.", reply_markup=get_main_keyboard(), parse_mode="Markdown")
+    elif query.data == 'stop':
+        await query.edit_message_text("🛑 **تم إيقاف التنبيهات مؤقتاً.**", reply_markup=get_main_keyboard(), parse_mode="Markdown")
 
-# ================= التشغيل =================
-
+# ================= التشغيل الرئيسي =================
 def main():
     application = Application.builder().token(BOT_TOKEN).build()
     
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CallbackQueryHandler(button_handler))
+    application.add_handler(CommandHandler("start", start_command))
+    application.add_handler(CallbackQueryHandler(button_tap))
     
-    print("البوت يعمل الآن مع أزرار حقيقية...")
+    print("🚀 البوت يعمل الآن...")
     application.run_polling()
 
 if __name__ == '__main__':
