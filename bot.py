@@ -2,7 +2,7 @@ import requests
 import time
 import statistics
 
-BOT_TOKEN = "PUT_NEW_TOKEN_HERE"
+BOT_TOKEN = "8452767198:AAG7JIWMBIkK21L8ihNd-O7AQYOXtXZ4lm0"
 CHAT_ID = "7960335113"
 BASE = "https://api.binance.com/api/v3"
 
