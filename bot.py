@@ -2,7 +2,7 @@ import requests
 import time
 import statistics
 
-BOT_TOKEN = "8452767198:AAG7JIWMBIkK21L8ihNd-O7AQYOXtXZ4lm0"
+BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
 CHAT_ID = "7960335113"
 BASE = "https://api.binance.com/api/v3"
 
@@ -34,7 +34,17 @@ def send_telegram(msg, symbol=None, is_alert=False):
                 ]
             }
         else:
-            keyboard = None
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔄 فحص الآن", "callback_data": "scan"},
+                        {"text": "🛑 إيقاف", "callback_data": "stop"}
+                    ],
+                    [
+                        {"text": "🟢 تشغيل تلقائي", "callback_data": "start"}
+                    ]
+                ]
+            }
 
         payload = {
             "chat_id": CHAT_ID,
@@ -86,15 +96,17 @@ def calculate_ema(prices, period=20):
 
 def get_signal(sym):
     try:
-        # ===== 5m DATA =====
+        # ===== 5m =====
         r5 = requests.get(f"{BASE}/klines",
                           params={"symbol": sym, "interval": "5m", "limit": 100},
                           timeout=10)
+
         if r5.status_code != 200:
             return None
 
         k5 = r5.json()
         closes_5m = [float(x[4]) for x in k5]
+        highs_5m = [float(x[2]) for x in k5]
         vols_5m = [float(x[5]) for x in k5]
 
         price_5m = closes_5m[-1]
@@ -104,66 +116,61 @@ def get_signal(sym):
 
         rsi_5m = calculate_rsi(closes_5m)
         ema20 = calculate_ema(closes_5m, 20)
-        ema50_5m = calculate_ema(closes_5m, 50)
 
-        # فلتر منع الارتدادات الضعيفة
-        if rsi_5m < 45:
-            return None
+        move_pct = (price_5m - open_5m) / open_5m
 
-        # ===== 1H DATA =====
+        # ===== 1H =====
         r1 = requests.get(f"{BASE}/klines",
                           params={"symbol": sym, "interval": "1h", "limit": 100},
                           timeout=10)
+
         if r1.status_code != 200:
             return None
 
         k1 = r1.json()
         closes_1h = [float(x[4]) for x in k1]
         highs_1h = [float(x[2]) for x in k1]
+        vols_1h = [float(x[5]) for x in k1]
 
         price_1h = closes_1h[-1]
+        vol_now_1h = vols_1h[-1]
+        vol_avg_1h = statistics.mean(vols_1h[-20:-1])
+
         rsi_1h = calculate_rsi(closes_1h)
         ema50_1h = calculate_ema(closes_1h, 50)
 
-        move_pct = (price_5m - open_5m) / open_5m
-
-        # ================= FLOW (هجومي مبكر) =================
-        if (
-            vol_now > vol_avg * 2
-            and move_pct > 0.005
-            and rsi_5m < 75
-        ):
+        # ================= FLOW =================
+        if vol_now > vol_avg * 2.8 and move_pct > 0.008 and price_5m > ema20:
             trade_type = "تدفق سيولة 🔥"
-            reason = "فوليوم 2x + حركة 0.5%"
+            reason = "فوليوم 2.8x + شمعة قوية"
 
             entry = price_5m
             tp1 = entry * 1.02
-            tp2 = entry * 1.045
+            tp2 = entry * 1.04
             sl = entry * 0.985
 
-        # ================= SWING (اختراق مبكر) =================
-        elif (
-            price_1h > ema50_1h
-            and rsi_1h > 52
-            and price_1h > max(highs_1h[-8:-1])
-        ):
+        # ================= SWING =================
+        elif (price_1h > ema50_1h and
+              rsi_1h > 55 and
+              price_1h > max(highs_1h[-24:-1]) and
+              vol_now_1h > vol_avg_1h * 1.5):
+
             trade_type = "سوينج 📈"
-            reason = "اختراق قمة 8 ساعات + فوق EMA50"
+            reason = "اختراق 1H + حجم داعم"
 
             entry = price_5m
-            tp1 = entry * 1.035
-            tp2 = entry * 1.07
+            tp1 = entry * 1.03
+            tp2 = entry * 1.06
             sl = entry * 0.97
 
-        # ================= SCALPING (هجومي مضبوط) =================
-        elif (
-            vol_now > vol_avg * 1.5
-            and price_5m > ema20
-            and ema20 > ema50_5m
-            and 50 < rsi_5m < 75
-        ):
+        # ================= SCALPING =================
+        elif (vol_now > vol_avg * 2.0 and
+              price_5m > ema20 and
+              50 < rsi_5m < 75 and
+              price_5m > max(highs_5m[-6:-1])):
+
             trade_type = "سكالبينج ⚡"
-            reason = "فوليوم مرتفع + EMA20 فوق EMA50"
+            reason = "كسر قمة 5 شمعات + فوليوم 2x"
 
             entry = price_5m
             tp1 = entry * 1.015
@@ -197,7 +204,7 @@ def get_signal(sym):
 def run_scanner():
     global LAST_HEARTBEAT
 
-    send_telegram("🛰️ تم تشغيل الرادار — نسخة هجومية دقيقة")
+    send_telegram("🛰️ تم تشغيل الرادار المتوازن")
 
     while True:
 
@@ -206,14 +213,14 @@ def run_scanner():
             LAST_HEARTBEAT = time.time()
 
         try:
-            # فلترة حسب حجم تداول 24 ساعة ≥ 15M
-            ticker = requests.get(f"{BASE}/ticker/24hr", timeout=10).json()
+            r = requests.get(f"{BASE}/exchangeInfo", timeout=10)
+            data = r.json()
 
             symbols = [
-                x["symbol"]
-                for x in ticker
-                if x["symbol"].endswith("USDT")
-                and float(x["quoteVolume"]) >= 15000000
+                s["symbol"]
+                for s in data["symbols"]
+                if s["quoteAsset"] == "USDT"
+                and s["status"] == "TRADING"
             ]
 
             for symbol in symbols:
