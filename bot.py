@@ -10,6 +10,7 @@ SENT_ALERTS = {}
 LAST_HEARTBEAT = time.time()
 
 
+
 # ================= TELEGRAM =================
 
 def send_telegram(msg, symbol=None, is_alert=False):
@@ -24,27 +25,11 @@ def send_telegram(msg, symbol=None, is_alert=False):
                             "text": "📊 فتح على Binance",
                             "url": f"https://www.binance.com/en/trade/{symbol}"
                         }
-                    ],
-                    [
-                        {
-                            "text": "🕌 الحكم الشرعي",
-                            "url": f"https://cryptoislamic.com/search?q={symbol.replace('USDT','')}"
-                        }
                     ]
                 ]
             }
         else:
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "🔄 فحص الآن", "callback_data": "scan"},
-                        {"text": "🛑 إيقاف", "callback_data": "stop"}
-                    ],
-                    [
-                        {"text": "🟢 تشغيل تلقائي", "callback_data": "start"}
-                    ]
-                ]
-            }
+            keyboard = None
 
         payload = {
             "chat_id": CHAT_ID,
@@ -62,8 +47,8 @@ def send_telegram(msg, symbol=None, is_alert=False):
 # ================= INDICATORS =================
 
 def calculate_rsi(prices, period=14):
-    if len(prices) < period + 1:
-        return 50
+    if len(prices) < period + 2:
+        return None
 
     deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
     gains = [d if d > 0 else 0 for d in deltas]
@@ -79,7 +64,7 @@ def calculate_rsi(prices, period=14):
     return 100 - (100 / (1 + rs))
 
 
-def calculate_ema(prices, period=20):
+def calculate_ema(prices, period):
     if len(prices) < period:
         return prices[-1]
 
@@ -96,11 +81,10 @@ def calculate_ema(prices, period=20):
 
 def get_signal(sym):
     try:
-        r5 = requests.get(
-            f"{BASE}/klines",
-            params={"symbol": sym, "interval": "5m", "limit": 100},
-            timeout=10
-        )
+        # ===== 5m =====
+        r5 = requests.get(f"{BASE}/klines",
+                          params={"symbol": sym, "interval": "5m", "limit": 100},
+                          timeout=10)
 
         if r5.status_code != 200:
             return None
@@ -108,6 +92,7 @@ def get_signal(sym):
         k5 = r5.json()
 
         closes_5m = [float(x[4]) for x in k5]
+        highs_5m = [float(x[2]) for x in k5]
         vols_5m = [float(x[5]) for x in k5]
 
         price_5m = closes_5m[-1]
@@ -115,74 +100,81 @@ def get_signal(sym):
         vol_now = vols_5m[-1]
         vol_avg = statistics.mean(vols_5m[-20:-1])
 
-        rsi_5m = calculate_rsi(closes_5m)
+        rsi_current = calculate_rsi(closes_5m)
+        rsi_prev1 = calculate_rsi(closes_5m[:-1])
+        rsi_prev2 = calculate_rsi(closes_5m[:-2])
+
         ema20 = calculate_ema(closes_5m, 20)
-
-        r1 = requests.get(
-            f"{BASE}/klines",
-            params={"symbol": sym, "interval": "1h", "limit": 100},
-            timeout=10
-        )
-
-        if r1.status_code != 200:
-            return None
-
-        k1 = r1.json()
-
-        closes_1h = [float(x[4]) for x in k1]
-        highs_1h = [float(x[2]) for x in k1]
-
-        price_1h = closes_1h[-1]
-        rsi_1h = calculate_rsi(closes_1h)
-        ema50_1h = calculate_ema(closes_1h, 50)
+        ema50 = calculate_ema(closes_5m, 50)
 
         move_pct = (price_5m - open_5m) / open_5m
 
+        signal_types = []
+
         # ===== FLOW =====
-        if vol_now > vol_avg * 3 and move_pct > 0.01:
-            trade_type = "تدفق سيولة 🔥"
-            reason = "فوليوم 3x + شمعة قوية"
-
-            entry = price_5m
-            tp1 = entry * 1.02
-            tp2 = entry * 1.04
-            sl = entry * 0.985
-
-        # ===== SWING =====
-        elif price_1h > ema50_1h and rsi_1h > 55 and price_1h > max(highs_1h[-20:-1]):
-            trade_type = "سوينج 📈"
-            reason = "اختراق قمة 1H + فوق EMA50"
-
-            entry = price_5m
-            tp1 = entry * 1.03
-            tp2 = entry * 1.06
-            sl = entry * 0.97
+        if vol_now > vol_avg * 2.2 and move_pct > 0.008 and price_5m > ema20:
+            signal_types.append("🔥 تدفق سيولة")
 
         # ===== SCALPING =====
-        elif vol_now > vol_avg * 1.8 and price_5m > ema20 and 50 < rsi_5m < 70:
-            trade_type = "سكالبينج ⚡"
-            reason = "فوليوم مرتفع + فوق EMA20"
+        if (rsi_prev2 and rsi_prev1 and rsi_current and
+            rsi_prev2 < 55 and
+            rsi_prev1 > 55 and
+            rsi_current > rsi_prev1 and
+            vol_now > vol_avg * 1.5 and
+            price_5m > ema20 and
+            price_5m > max(highs_5m[-6:-1])):
+            signal_types.append("⚡ سكالبينج")
 
-            entry = price_5m
-            tp1 = entry * 1.015
-            tp2 = entry * 1.03
-            sl = entry * 0.988
+        # ===== TREND BUILD =====
+        if (ema20 > ema50 and
+            price_5m > ema20 and
+            rsi_current and 55 < rsi_current < 75 and
+            vol_now > vol_avg * 1.4 and
+            price_5m > max(highs_5m[-9:-1])):
+            signal_types.append("🟢 Trend Build")
 
-        else:
+        # ===== SWING =====
+        r1 = requests.get(f"{BASE}/klines",
+                          params={"symbol": sym, "interval": "1h", "limit": 100},
+                          timeout=10)
+
+        if r1.status_code == 200:
+            k1 = r1.json()
+            closes_1h = [float(x[4]) for x in k1]
+            highs_1h = [float(x[2]) for x in k1]
+            vols_1h = [float(x[5]) for x in k1]
+
+            price_1h = closes_1h[-1]
+            vol_1h = vols_1h[-1]
+            vol_avg_1h = statistics.mean(vols_1h[-20:-1])
+
+            rsi_1h = calculate_rsi(closes_1h)
+            ema50_1h = calculate_ema(closes_1h, 50)
+
+            if (price_1h > ema50_1h and
+                rsi_1h and rsi_1h > 52 and
+                price_1h > max(highs_1h[-13:-1]) and
+                vol_1h > vol_avg_1h * 1.3):
+                signal_types.append("📈 سوينج")
+
+        if not signal_types:
             return None
 
-        tp1_pct = ((tp1 - entry) / entry) * 100
-        tp2_pct = ((tp2 - entry) / entry) * 100
-        sl_pct = ((entry - sl) / entry) * 100
+        entry = price_5m
+        tp1 = entry * 1.02
+        tp2 = entry * 1.04
+        tp3 = entry * 1.07
+        sl = entry * 0.985
 
         return (
-            f"🚀 إشارة — {trade_type}\n\n"
+            f"🚀 إشارة متعددة\n\n"
             f"🪙 {sym}\n"
-            f"💰 دخول: {entry:.6f}\n"
-            f"🧠 السبب: {reason}\n\n"
-            f"🎯 TP1: {tp1:.6f} (+{tp1_pct:.2f}%)\n"
-            f"🎯 TP2: {tp2:.6f} (+{tp2_pct:.2f}%)\n"
-            f"🛑 SL: {sl:.6f} (-{sl_pct:.2f}%)"
+            f"📊 الأنواع:\n- " + "\n- ".join(signal_types) + "\n\n"
+            f"💰 دخول: {entry:.6f}\n\n"
+            f"🎯 TP1: {tp1:.6f}\n"
+            f"🎯 TP2: {tp2:.6f}\n"
+            f"🎯 TP3: {tp3:.6f}\n"
+            f"🛑 SL: {sl:.6f}"
         )
 
     except Exception as e:
@@ -195,7 +187,7 @@ def get_signal(sym):
 def run_scanner():
     global LAST_HEARTBEAT
 
-    send_telegram("🛰️ تم تشغيل الرادار")
+    send_telegram("🛰️ تم تشغيل الرادار المتوازن")
 
     while True:
 
@@ -207,14 +199,12 @@ def run_scanner():
             r = requests.get(f"{BASE}/exchangeInfo", timeout=10)
 
             if r.status_code != 200:
-                print("ExchangeInfo ERROR:", r.text)
                 time.sleep(10)
                 continue
 
             data = r.json()
 
             if "symbols" not in data:
-                print("No symbols key:", data)
                 time.sleep(10)
                 continue
 
