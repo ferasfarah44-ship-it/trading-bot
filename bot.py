@@ -96,17 +96,18 @@ def calculate_ema(prices, period=20):
 
 def get_signal(sym):
     try:
-        # ===== 5m =====
-        r5 = requests.get(f"{BASE}/klines",
-                          params={"symbol": sym, "interval": "5m", "limit": 100},
-                          timeout=10)
+        r5 = requests.get(
+            f"{BASE}/klines",
+            params={"symbol": sym, "interval": "5m", "limit": 100},
+            timeout=10
+        )
 
         if r5.status_code != 200:
             return None
 
         k5 = r5.json()
+
         closes_5m = [float(x[4]) for x in k5]
-        highs_5m = [float(x[2]) for x in k5]
         vols_5m = [float(x[5]) for x in k5]
 
         price_5m = closes_5m[-1]
@@ -117,60 +118,50 @@ def get_signal(sym):
         rsi_5m = calculate_rsi(closes_5m)
         ema20 = calculate_ema(closes_5m, 20)
 
-        move_pct = (price_5m - open_5m) / open_5m
-
-        # ===== 1H =====
-        r1 = requests.get(f"{BASE}/klines",
-                          params={"symbol": sym, "interval": "1h", "limit": 100},
-                          timeout=10)
+        r1 = requests.get(
+            f"{BASE}/klines",
+            params={"symbol": sym, "interval": "1h", "limit": 100},
+            timeout=10
+        )
 
         if r1.status_code != 200:
             return None
 
         k1 = r1.json()
+
         closes_1h = [float(x[4]) for x in k1]
         highs_1h = [float(x[2]) for x in k1]
-        vols_1h = [float(x[5]) for x in k1]
 
         price_1h = closes_1h[-1]
-        vol_now_1h = vols_1h[-1]
-        vol_avg_1h = statistics.mean(vols_1h[-20:-1])
-
         rsi_1h = calculate_rsi(closes_1h)
         ema50_1h = calculate_ema(closes_1h, 50)
 
-        # ================= FLOW =================
-        if vol_now > vol_avg * 2.8 and move_pct > 0.008 and price_5m > ema20:
+        move_pct = (price_5m - open_5m) / open_5m
+
+        # ===== FLOW =====
+        if vol_now > vol_avg * 3 and move_pct > 0.01:
             trade_type = "تدفق سيولة 🔥"
-            reason = "فوليوم 2.8x + شمعة قوية"
+            reason = "فوليوم 3x + شمعة قوية"
 
             entry = price_5m
             tp1 = entry * 1.02
             tp2 = entry * 1.04
             sl = entry * 0.985
 
-        # ================= SWING =================
-        elif (price_1h > ema50_1h and
-              rsi_1h > 55 and
-              price_1h > max(highs_1h[-24:-1]) and
-              vol_now_1h > vol_avg_1h * 1.5):
-
+        # ===== SWING =====
+        elif price_1h > ema50_1h and rsi_1h > 55 and price_1h > max(highs_1h[-20:-1]):
             trade_type = "سوينج 📈"
-            reason = "اختراق 1H + حجم داعم"
+            reason = "اختراق قمة 1H + فوق EMA50"
 
             entry = price_5m
             tp1 = entry * 1.03
             tp2 = entry * 1.06
             sl = entry * 0.97
 
-        # ================= SCALPING =================
-        elif (vol_now > vol_avg * 2.0 and
-              price_5m > ema20 and
-              50 < rsi_5m < 75 and
-              price_5m > max(highs_5m[-6:-1])):
-
+        # ===== SCALPING =====
+        elif vol_now > vol_avg * 1.8 and price_5m > ema20 and 50 < rsi_5m < 70:
             trade_type = "سكالبينج ⚡"
-            reason = "كسر قمة 5 شمعات + فوليوم 2x"
+            reason = "فوليوم مرتفع + فوق EMA20"
 
             entry = price_5m
             tp1 = entry * 1.015
@@ -204,7 +195,7 @@ def get_signal(sym):
 def run_scanner():
     global LAST_HEARTBEAT
 
-    send_telegram("🛰️ تم تشغيل الرادار المتوازن")
+    send_telegram("🛰️ تم تشغيل الرادار")
 
     while True:
 
@@ -214,13 +205,24 @@ def run_scanner():
 
         try:
             r = requests.get(f"{BASE}/exchangeInfo", timeout=10)
+
+            if r.status_code != 200:
+                print("ExchangeInfo ERROR:", r.text)
+                time.sleep(10)
+                continue
+
             data = r.json()
+
+            if "symbols" not in data:
+                print("No symbols key:", data)
+                time.sleep(10)
+                continue
 
             symbols = [
                 s["symbol"]
                 for s in data["symbols"]
-                if s["quoteAsset"] == "USDT"
-                and s["status"] == "TRADING"
+                if s.get("quoteAsset") == "USDT"
+                and s.get("status") == "TRADING"
             ]
 
             for symbol in symbols:
@@ -232,7 +234,7 @@ def run_scanner():
                         send_telegram(signal, symbol=symbol, is_alert=True)
                         SENT_ALERTS[symbol] = now
 
-                time.sleep(0.05)
+                time.sleep(0.07)
 
         except Exception as e:
             print("Scanner ERROR:", e)
