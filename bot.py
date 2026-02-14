@@ -8,7 +8,6 @@ BASE = "https://api.binance.com/api/v3"
 
 SENT_ALERTS = {}
 LAST_HEARTBEAT = time.time()
-BOT_STATUS = "تشغيل تلقائي 🟢"
 
 
 # ================= TELEGRAM =================
@@ -17,20 +16,6 @@ def send_telegram(msg, symbol=None, is_alert=False):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-        # أزرار التحكم الأساسية
-        main_keyboard = {
-            "inline_keyboard": [
-                [
-                    {"text": "🔄 فحص الآن", "callback_data": "scan"},
-                    {"text": "🛑 إيقاف", "callback_data": "stop"},
-                ],
-                [
-                    {"text": "🟢 تشغيل تلقائي", "callback_data": "start"}
-                ]
-            ]
-        }
-
-        # أزرار العملة عند وجود فرصة
         if symbol:
             keyboard = {
                 "inline_keyboard": [
@@ -43,13 +28,23 @@ def send_telegram(msg, symbol=None, is_alert=False):
                     [
                         {
                             "text": "🕌 الحكم الشرعي",
-                            "url": f"https://cryptoislam.com/search?q={symbol.replace('USDT','')}"
+                            "url": f"https://cryptoislamic.com/search?q={symbol.replace('USDT','')}"
                         }
                     ]
                 ]
             }
         else:
-            keyboard = main_keyboard
+            keyboard = {
+                "inline_keyboard": [
+                    [
+                        {"text": "🔄 فحص الآن", "callback_data": "scan"},
+                        {"text": "🛑 إيقاف", "callback_data": "stop"}
+                    ],
+                    [
+                        {"text": "🟢 تشغيل تلقائي", "callback_data": "start"}
+                    ]
+                ]
+            }
 
         payload = {
             "chat_id": CHAT_ID,
@@ -58,9 +53,7 @@ def send_telegram(msg, symbol=None, is_alert=False):
             "disable_notification": False if is_alert else True
         }
 
-        r = requests.post(url, json=payload, timeout=10)
-
-        print("Telegram:", r.status_code, r.text)
+        requests.post(url, json=payload, timeout=10)
 
     except Exception as e:
         print("Telegram ERROR:", e)
@@ -103,46 +96,90 @@ def calculate_ema(prices, period=20):
 
 def get_signal(sym):
     try:
-        params = {"symbol": sym, "interval": "5m", "limit": 50}
-        r = requests.get(f"{BASE}/klines", params=params, timeout=10)
+        # ===== 5m =====
+        r5 = requests.get(f"{BASE}/klines",
+                          params={"symbol": sym, "interval": "5m", "limit": 100},
+                          timeout=10)
 
-        if r.status_code != 200:
+        if r5.status_code != 200:
             return None
 
-        data = r.json()
+        k5 = r5.json()
+        closes_5m = [float(x[4]) for x in k5]
+        vols_5m = [float(x[5]) for x in k5]
 
-        closes = [float(k[4]) for k in data]
-        vols = [float(k[5]) for k in data]
+        price_5m = closes_5m[-1]
+        open_5m = float(k5[-1][1])
+        vol_now = vols_5m[-1]
+        vol_avg = statistics.mean(vols_5m[-20:-1])
 
-        current_price = closes[-1]
-        open_price = float(data[-1][1])
-        vol_now = vols[-1]
-        vol_avg = statistics.mean(vols[-20:-1])
+        rsi_5m = calculate_rsi(closes_5m)
+        ema20 = calculate_ema(closes_5m, 20)
 
-        rsi_val = calculate_rsi(closes)
-        ema_val = calculate_ema(closes)
+        # ===== 1H =====
+        r1 = requests.get(f"{BASE}/klines",
+                          params={"symbol": sym, "interval": "1h", "limit": 100},
+                          timeout=10)
 
-        if (
-            vol_now > vol_avg * 1.8
-            and current_price > ema_val
-            and 55 < rsi_val < 70
-        ):
-            entry = current_price
+        if r1.status_code != 200:
+            return None
+
+        k1 = r1.json()
+        closes_1h = [float(x[4]) for x in k1]
+        highs_1h = [float(x[2]) for x in k1]
+
+        price_1h = closes_1h[-1]
+        rsi_1h = calculate_rsi(closes_1h)
+        ema50_1h = calculate_ema(closes_1h, 50)
+
+        move_pct = (price_5m - open_5m) / open_5m
+
+        # ===== FLOW =====
+        if vol_now > vol_avg * 3 and move_pct > 0.01:
+            trade_type = "تدفق سيولة 🔥"
+            reason = "فوليوم أعلى من 3x + شمعة قوية"
+
+            entry = price_5m
+            tp1 = entry * 1.02
+            tp2 = entry * 1.04
+            sl = entry * 0.985
+
+        # ===== SWING =====
+        elif price_1h > ema50_1h and rsi_1h > 55 and price_1h > max(highs_1h[-20:-1]):
+            trade_type = "سوينج 📈"
+            reason = "اختراق قمة 1H + فوق EMA50"
+
+            entry = price_5m
+            tp1 = entry * 1.03
+            tp2 = entry * 1.06
+            sl = entry * 0.97
+
+        # ===== SCALPING =====
+        elif vol_now > vol_avg * 1.8 and price_5m > ema20 and 50 < rsi_5m < 70:
+            trade_type = "سكالبينج ⚡"
+            reason = "فوليوم مرتفع + فوق EMA20"
+
+            entry = price_5m
             tp1 = entry * 1.015
             tp2 = entry * 1.03
             sl = entry * 0.988
 
-            return (
-                f"🚀 فرصة تداول\n\n"
-                f"العملة: {sym}\n"
-                f"الدخول: {entry:.6f}\n"
-                f"RSI: {rsi_val:.2f}\n\n"
-                f"TP1: {tp1:.6f}\n"
-                f"TP2: {tp2:.6f}\n"
-                f"SL: {sl:.6f}"
-            )
+        else:
+            return None
 
-        return None
+        tp1_pct = ((tp1 - entry) / entry) * 100
+        tp2_pct = ((tp2 - entry) / entry) * 100
+        sl_pct = ((entry - sl) / entry) * 100
+
+        return (
+            f"🚀 إشارة — {trade_type}\n\n"
+            f"🪙 {sym}\n"
+            f"💰 دخول: {entry:.6f}\n"
+            f"🧠 السبب: {reason}\n\n"
+            f"🎯 TP1: {tp1:.6f} (+{tp1_pct:.2f}%)\n"
+            f"🎯 TP2: {tp2:.6f} (+{tp2_pct:.2f}%)\n"
+            f"🛑 SL: {sl:.6f} (-{sl_pct:.2f}%)"
+        )
 
     except Exception as e:
         print("Signal ERROR:", e)
@@ -154,14 +191,12 @@ def get_signal(sym):
 def run_scanner():
     global LAST_HEARTBEAT
 
-    print("Bot Started")
-    send_telegram("🛰️ تم بدء تشغيل الرادار")
+    send_telegram("🛰️ تم تشغيل الرادار")
 
     while True:
 
-        # رسالة الاطمئنان كل ساعة
         if time.time() - LAST_HEARTBEAT >= 3600:
-            send_telegram("✅ تم الفحص — لا توجد فرص حالياً.")
+            send_telegram("✅ فحص مستمر — لا توجد فرص حالياً.")
             LAST_HEARTBEAT = time.time()
 
         try:
@@ -180,11 +215,7 @@ def run_scanner():
 
                 if signal:
                     now = time.time()
-
-                    if (
-                        symbol not in SENT_ALERTS
-                        or (now - SENT_ALERTS[symbol] > 7200)
-                    ):
+                    if symbol not in SENT_ALERTS or (now - SENT_ALERTS[symbol] > 7200):
                         send_telegram(signal, symbol=symbol, is_alert=True)
                         SENT_ALERTS[symbol] = now
 
