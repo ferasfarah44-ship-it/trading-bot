@@ -34,17 +34,7 @@ def send_telegram(msg, symbol=None, is_alert=False):
                 ]
             }
         else:
-            keyboard = {
-                "inline_keyboard": [
-                    [
-                        {"text": "🔄 فحص الآن", "callback_data": "scan"},
-                        {"text": "🛑 إيقاف", "callback_data": "stop"}
-                    ],
-                    [
-                        {"text": "🟢 تشغيل تلقائي", "callback_data": "start"}
-                    ]
-                ]
-            }
+            keyboard = None
 
         payload = {
             "chat_id": CHAT_ID,
@@ -96,11 +86,10 @@ def calculate_ema(prices, period=20):
 
 def get_signal(sym):
     try:
-        # ===== 5m =====
+        # ===== 5m DATA =====
         r5 = requests.get(f"{BASE}/klines",
                           params={"symbol": sym, "interval": "5m", "limit": 100},
                           timeout=10)
-
         if r5.status_code != 200:
             return None
 
@@ -115,12 +104,16 @@ def get_signal(sym):
 
         rsi_5m = calculate_rsi(closes_5m)
         ema20 = calculate_ema(closes_5m, 20)
+        ema50_5m = calculate_ema(closes_5m, 50)
 
-        # ===== 1H =====
+        # فلتر منع الارتدادات الضعيفة
+        if rsi_5m < 45:
+            return None
+
+        # ===== 1H DATA =====
         r1 = requests.get(f"{BASE}/klines",
                           params={"symbol": sym, "interval": "1h", "limit": 100},
                           timeout=10)
-
         if r1.status_code != 200:
             return None
 
@@ -134,30 +127,43 @@ def get_signal(sym):
 
         move_pct = (price_5m - open_5m) / open_5m
 
-        # ===== FLOW =====
-        if vol_now > vol_avg * 3 and move_pct > 0.01:
+        # ================= FLOW (هجومي مبكر) =================
+        if (
+            vol_now > vol_avg * 2
+            and move_pct > 0.005
+            and rsi_5m < 75
+        ):
             trade_type = "تدفق سيولة 🔥"
-            reason = "فوليوم أعلى من 3x + شمعة قوية"
+            reason = "فوليوم 2x + حركة 0.5%"
 
             entry = price_5m
             tp1 = entry * 1.02
-            tp2 = entry * 1.04
+            tp2 = entry * 1.045
             sl = entry * 0.985
 
-        # ===== SWING =====
-        elif price_1h > ema50_1h and rsi_1h > 55 and price_1h > max(highs_1h[-20:-1]):
+        # ================= SWING (اختراق مبكر) =================
+        elif (
+            price_1h > ema50_1h
+            and rsi_1h > 52
+            and price_1h > max(highs_1h[-8:-1])
+        ):
             trade_type = "سوينج 📈"
-            reason = "اختراق قمة 1H + فوق EMA50"
+            reason = "اختراق قمة 8 ساعات + فوق EMA50"
 
             entry = price_5m
-            tp1 = entry * 1.03
-            tp2 = entry * 1.06
+            tp1 = entry * 1.035
+            tp2 = entry * 1.07
             sl = entry * 0.97
 
-        # ===== SCALPING =====
-        elif vol_now > vol_avg * 1.8 and price_5m > ema20 and 50 < rsi_5m < 70:
+        # ================= SCALPING (هجومي مضبوط) =================
+        elif (
+            vol_now > vol_avg * 1.5
+            and price_5m > ema20
+            and ema20 > ema50_5m
+            and 50 < rsi_5m < 75
+        ):
             trade_type = "سكالبينج ⚡"
-            reason = "فوليوم مرتفع + فوق EMA20"
+            reason = "فوليوم مرتفع + EMA20 فوق EMA50"
 
             entry = price_5m
             tp1 = entry * 1.015
@@ -191,7 +197,7 @@ def get_signal(sym):
 def run_scanner():
     global LAST_HEARTBEAT
 
-    send_telegram("🛰️ تم تشغيل الرادار")
+    send_telegram("🛰️ تم تشغيل الرادار — نسخة هجومية دقيقة")
 
     while True:
 
@@ -200,14 +206,14 @@ def run_scanner():
             LAST_HEARTBEAT = time.time()
 
         try:
-            r = requests.get(f"{BASE}/exchangeInfo", timeout=10)
-            data = r.json()
+            # فلترة حسب حجم تداول 24 ساعة ≥ 15M
+            ticker = requests.get(f"{BASE}/ticker/24hr", timeout=10).json()
 
             symbols = [
-                s["symbol"]
-                for s in data["symbols"]
-                if s["quoteAsset"] == "USDT"
-                and s["status"] == "TRADING"
+                x["symbol"]
+                for x in ticker
+                if x["symbol"].endswith("USDT")
+                and float(x["quoteVolume"]) >= 15000000
             ]
 
             for symbol in symbols:
