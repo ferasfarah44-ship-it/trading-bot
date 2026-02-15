@@ -1,10 +1,8 @@
 import requests
 import time
 import statistics
-import os
 
-# ================== CONFIG ==================
-
+# ========= الإعدادات =========
 BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
 CHAT_ID = "7960335113"
 BASE = "https://api.binance.com/api/v3"
@@ -12,45 +10,52 @@ BASE = "https://api.binance.com/api/v3"
 SENT_ALERTS = {}
 LAST_HEARTBEAT = time.time()
 
-# ================= TELEGRAM =================
+# ========= TELEGRAM =========
 
 def send_telegram(msg, symbol=None, is_alert=False):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
-        keyboard = None
-        if symbol:
-            keyboard = {
-                "inline_keyboard": [[
-                    {"text": "📊 فتح على Binance",
-                     "url": f"https://www.binance.com/en/trade/{symbol}"}
-                ]]
-            }
-
         payload = {
             "chat_id": CHAT_ID,
             "text": msg,
-            "reply_markup": keyboard,
             "disable_notification": False if is_alert else True
         }
 
-        requests.post(url, json=payload, timeout=10)
+        if symbol:
+            payload["reply_markup"] = {
+                "inline_keyboard": [[
+                    {
+                        "text": "📊 فتح على Binance",
+                        "url": f"https://www.binance.com/en/trade/{symbol}"
+                    }
+                ]]
+            }
+
+        r = requests.post(url, json=payload, timeout=10)
+        print("Telegram:", r.text)
 
     except Exception as e:
         print("Telegram ERROR:", e)
 
-# ================= INDICATORS =================
+# ========= INDICATORS =========
 
 def calculate_rsi(prices, period=14):
     if len(prices) < period + 2:
         return None
 
-    deltas = [prices[i+1] - prices[i] for i in range(len(prices)-1)]
-    gains = [d if d > 0 else 0 for d in deltas]
-    losses = [-d if d < 0 else 0 for d in deltas]
+    gains = []
+    losses = []
 
-    avg_gain = sum(gains[:period]) / period
-    avg_loss = sum(losses[:period]) / period
+    for i in range(1, period + 1):
+        delta = prices[-i] - prices[-i-1]
+        if delta >= 0:
+            gains.append(delta)
+        else:
+            losses.append(abs(delta))
+
+    avg_gain = sum(gains) / period if gains else 0
+    avg_loss = sum(losses) / period if losses else 0
 
     if avg_loss == 0:
         return 100
@@ -70,120 +75,112 @@ def calculate_ema(prices, period):
 
     return ema
 
-# ================= SIGNAL =================
+# ========= SIGNAL =========
 
 def get_signal(sym):
     try:
-        r5 = requests.get(
-            f"{BASE}/klines",
-            params={"symbol": sym, "interval": "5m", "limit": 100},
-            timeout=10
-        )
+        r = requests.get(f"{BASE}/klines",
+                         params={"symbol": sym, "interval": "5m", "limit": 100},
+                         timeout=10)
 
-        if r5.status_code != 200:
+        if r.status_code != 200:
             return None
 
-        k5 = r5.json()
+        k = r.json()
 
-        closes = [float(x[4]) for x in k5]
-        highs = [float(x[2]) for x in k5]
-        vols = [float(x[5]) for x in k5]
+        closes = [float(x[4]) for x in k]
+        highs = [float(x[2]) for x in k]
+        vols = [float(x[5]) for x in k]
 
         price = closes[-1]
-        open_price = float(k5[-1][1])
-
+        open_price = float(k[-1][1])
         vol_now = vols[-1]
         vol_avg = statistics.mean(vols[-20:-1])
 
-        rsi_current = calculate_rsi(closes)
-        rsi_prev1 = calculate_rsi(closes[:-1])
-        rsi_prev2 = calculate_rsi(closes[:-2])
-
+        rsi = calculate_rsi(closes)
         ema20 = calculate_ema(closes, 20)
         ema50 = calculate_ema(closes, 50)
 
         move_pct = (price - open_price) / open_price
 
-        signal_types = []
+        signal_type = None
 
-        # 🚀 Parabolic
-        if vol_now > vol_avg * 3.2 and move_pct > 0.018:
-            signal_types.append("🚀 انفجار عمودي")
+        # 🚀 انفجار
+        if vol_now > vol_avg * 2.5 and move_pct > 0.015:
+            signal_type = "🚀 انفجار سعري"
 
-        # 🔥 Flow
-        if vol_now > vol_avg * 2.2 and move_pct > 0.008 and price > ema20:
-            signal_types.append("🔥 تدفق سيولة")
+        # 🔥 تدفق سيولة
+        elif vol_now > vol_avg * 1.8 and price > ema20:
+            signal_type = "🔥 تدفق سيولة"
 
-        # ⚡ Scalping
-        if (rsi_prev2 and rsi_prev1 and rsi_current and
-            rsi_prev2 < 55 and rsi_prev1 > 55 and
-            vol_now > vol_avg * 1.5 and
-            price > max(highs[-6:-1])):
-            signal_types.append("⚡ سكالبينج")
+        # ⚡ سكالبينج
+        elif rsi and rsi > 55 and vol_now > vol_avg * 1.5 and price > max(highs[-5:-1]):
+            signal_type = "⚡ سكالبينج"
 
-        # 🟢 Trend Build
-        if (ema20 > ema50 and
-            rsi_current and 55 < rsi_current < 75 and
-            vol_now > vol_avg * 1.4 and
-            price > max(highs[-9:-1])):
-            signal_types.append("🟢 Trend Build")
+        # 🟢 اتجاه صاعد
+        elif ema20 > ema50 and rsi and rsi > 52:
+            signal_type = "🟢 اتجاه صاعد"
 
-        if not signal_types:
+        if not signal_type:
             return None
 
         entry = price
         tp1 = entry * 1.02
         tp2 = entry * 1.04
-        tp3 = entry * 1.07
+        tp3 = entry * 1.06
         sl = entry * 0.985
 
-        return (
-            f"🚀 إشارة متعددة\n\n"
-            f"🪙 {sym}\n"
-            f"📊 الأنواع:\n- " + "\n- ".join(signal_types) + "\n\n"
-            f"💰 دخول: {entry:.6f}\n"
-            f"RSI: {rsi_current:.2f}\n"
-            f"القوة: {vol_now/vol_avg:.1f}x\n\n"
-            f"🎯 TP1: {tp1:.6f}\n"
-            f"🎯 TP2: {tp2:.6f}\n"
-            f"🎯 TP3: {tp3:.6f}\n"
-            f"🛑 SL: {sl:.6f}"
-        )
+        return f"""
+🚨 إشارة قوية مكتشفة
+
+🪙 العملة: {sym}
+📌 النوع: {signal_type}
+
+💰 دخول: {entry:.6f}
+📈 RSI: {rsi:.2f if rsi else 0}
+🔥 قوة الفوليوم: {vol_now/vol_avg:.1f}x
+
+🎯 الهدف 1: {tp1:.6f}
+🎯 الهدف 2: {tp2:.6f}
+🎯 الهدف 3: {tp3:.6f}
+🛑 وقف: {sl:.6f}
+"""
 
     except Exception as e:
-        print("Signal ERROR:", sym, e)
+        print("Signal ERROR:", e)
         return None
 
-# ================= LOOP =================
+# ========= LOOP =========
 
 def run_scanner():
     global LAST_HEARTBEAT
 
     print("=== BOT STARTED SUCCESSFULLY ===")
-    send_telegram("🛰️ تم تشغيل الرادار بنجاح")
+    send_telegram("🛰️ الرادار بدأ العمل...")
 
     while True:
-        print("Scanning cycle running...")
 
         if time.time() - LAST_HEARTBEAT >= 3600:
-            send_telegram("✅ فحص مستمر — الرادار يعمل.")
+            send_telegram("✅ الرادار يعمل بشكل طبيعي.")
             LAST_HEARTBEAT = time.time()
 
         try:
             r = requests.get(f"{BASE}/exchangeInfo", timeout=10)
-
             if r.status_code != 200:
-                print("ExchangeInfo ERROR")
                 time.sleep(10)
                 continue
 
             symbols = [
-                s["symbol"] for s in r.json()["symbols"]
+                s["symbol"]
+                for s in r.json()["symbols"]
                 if s.get("quoteAsset") == "USDT"
                 and s.get("status") == "TRADING"
             ]
 
-            print("Total symbols:", len(symbols))
+            # مسح أول 120 عملة فقط
+            symbols = symbols[:120]
+
+            print(f"Scanning top {len(symbols)} symbols...")
 
             for symbol in symbols:
                 signal = get_signal(symbol)
@@ -193,9 +190,8 @@ def run_scanner():
                     if symbol not in SENT_ALERTS or now - SENT_ALERTS[symbol] > 7200:
                         send_telegram(signal, symbol=symbol, is_alert=True)
                         SENT_ALERTS[symbol] = now
-                        print("ALERT SENT:", symbol)
 
-                time.sleep(0.08)
+                time.sleep(0.15)
 
         except Exception as e:
             print("Scanner ERROR:", e)
@@ -203,7 +199,6 @@ def run_scanner():
 
         time.sleep(5)
 
-# ================= START =================
 
 if __name__ == "__main__":
     run_scanner()
