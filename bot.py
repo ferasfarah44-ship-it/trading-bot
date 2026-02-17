@@ -1,96 +1,88 @@
-import os
+
+        "import os
 import time
-import pandas as pd
-from binance.client import Client
-import ta
 import requests
+import pandas as pd
+import ta
 from datetime import datetime, timedelta
 
-# ====== CONFIG ======
 TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
 CHAT_ID = os.getenv("7960335113")
 
-INTERVAL = Client.KLINE_INTERVAL_15MINUTE
-LIMIT = 120
 MIN_SCORE = 6
 MIN_VOLUME_24H = 5_000_000
 COOLDOWN_MINUTES = 60
 
-client = Client()  # بدون API نهائيًا
 sent_coins = {}
 
-# ====== TELEGRAM ======
+# ===== TELEGRAM =====
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
+    data = {
         "chat_id": CHAT_ID,
         "text": message,
         "parse_mode": "HTML"
     }
-    requests.post(url, data=payload)
+    requests.post(url, data=data)
 
-# ====== BTC FILTER ======
+# ===== GET KLINES =====
+def get_klines(symbol):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=120"
+    r = requests.get(url)
+    return r.json()
+
+# ===== GET 24H TICKER =====
+def get_ticker(symbol):
+    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+    r = requests.get(url)
+    return r.json()
+
+# ===== BTC FILTER =====
 def btc_trend_ok():
-    klines = client.get_klines(symbol="BTCUSDT", interval=INTERVAL, limit=50)
-    df = pd.DataFrame(klines, columns=[
-        'time','open','high','low','close','volume',
-        'close_time','qav','trades','taker_base','taker_quote','ignore'
-    ])
-    df['close'] = df['close'].astype(float)
-    df['ma25'] = ta.trend.sma_indicator(df['close'], window=25)
-    last = df.iloc[-1]
+    data = get_klines("BTCUSDT")
+    df = pd.DataFrame(data)
+    df[4] = df[4].astype(float)
+    df["ma25"] = df[4].rolling(25).mean()
+    return df.iloc[-1][4] > df.iloc[-1]["ma25"]
 
-    return last['close'] > last['ma25']
-
-# ====== ANALYZE ======
+# ===== ANALYZE =====
 def analyze(symbol):
     try:
-        ticker = client.get_ticker(symbol=symbol)
-
-        change_24h = float(ticker['priceChangePercent'])
-        volume_24h = float(ticker['quoteVolume'])
+        ticker = get_ticker(symbol)
+        volume_24h = float(ticker["quoteVolume"])
+        change_24h = float(ticker["priceChangePercent"])
 
         if volume_24h < MIN_VOLUME_24H:
             return
 
-        klines = client.get_klines(symbol=symbol, interval=INTERVAL, limit=LIMIT)
+        klines = get_klines(symbol)
+        df = pd.DataFrame(klines)
 
-        df = pd.DataFrame(klines, columns=[
-            'time','open','high','low','close','volume',
-            'close_time','qav','trades','taker_base','taker_quote','ignore'
-        ])
+        df["close"] = df[4].astype(float)
+        df["high"] = df[2].astype(float)
+        df["volume"] = df[5].astype(float)
 
-        df['close'] = df['close'].astype(float)
-        df['high'] = df['high'].astype(float)
-        df['volume'] = df['volume'].astype(float)
-
-        df['ma7'] = ta.trend.sma_indicator(df['close'], window=7)
-        df['ma25'] = ta.trend.sma_indicator(df['close'], window=25)
-        df['ma99'] = ta.trend.sma_indicator(df['close'], window=99)
-        df['rsi'] = ta.momentum.rsi(df['close'], window=14)
+        df["ma7"] = df["close"].rolling(7).mean()
+        df["ma25"] = df["close"].rolling(25).mean()
+        df["ma99"] = df["close"].rolling(99).mean()
+        df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
         last = df.iloc[-1]
         score = 0
 
-        breakout = last['close'] > df['high'][-20:-1].max()
-        volume_break = last['volume'] > df['volume'].rolling(20).mean().iloc[-1]
-        trend_cross = last['ma7'] > last['ma25']
-        above_ma99 = last['close'] > last['ma99']
-        rsi_good = 50 < last['rsi'] < 72
+        breakout = last["close"] > df["high"][-20:-1].max()
+        volume_break = last["volume"] > df["volume"].rolling(20).mean().iloc[-1]
+        trend_cross = last["ma7"] > last["ma25"]
+        above_ma99 = last["close"] > last["ma99"]
+        rsi_good = 50 < last["rsi"] < 72
         change_ok = 2 < change_24h < 18
 
-        if breakout:
-            score += 3
-        if volume_break:
-            score += 2
-        if trend_cross:
-            score += 2
-        if above_ma99:
-            score += 1
-        if rsi_good:
-            score += 1
-        if change_ok:
-            score += 1
+        if breakout: score += 3
+        if volume_break: score += 2
+        if trend_cross: score += 2
+        if above_ma99: score += 1
+        if rsi_good: score += 1
+        if change_ok: score += 1
 
         if score >= MIN_SCORE:
             now = datetime.now()
@@ -99,7 +91,7 @@ def analyze(symbol):
                 if now - sent_coins[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
                     return
 
-            entry = last['close']
+            entry = last["close"]
             target1 = entry * 1.025
             target2 = entry * 1.05
             stop = entry * 0.97
@@ -109,36 +101,33 @@ def analyze(symbol):
 🔥 <b>{symbol}</b>
 
 السعر الحالي: {round(entry,4)}
-
 📌 دخول: {round(entry,4)}
-🎯 هدف 1: {round(target1,4)}
-🎯 هدف 2: {round(target2,4)}
+🎯 هدف1: {round(target1,4)}
+🎯 هدف2: {round(target2,4)}
 🛑 وقف: {round(stop,4)}
 
-📊 نسبة ربح محتملة: {round(rr,2)}%
-⭐ تقييم الفرصة: {score}/10
+📊 ربح محتمل: {round(rr,2)}%
+⭐ تقييم: {score}/10
 💰 حجم 24h: {round(volume_24h/1_000_000,2)}M
 """
-
             send_telegram(message)
             sent_coins[symbol] = now
 
     except:
         pass
 
-# ====== MAIN LOOP ======
+# ===== MAIN LOOP =====
 def main():
     if not btc_trend_ok():
-        print("BTC trend not favorable. Skipping cycle.")
+        print("BTC negative, skipping.")
         return
 
-    exchange_info = client.get_exchange_info()
+    exchange = requests.get("https://api.binance.com/api/v3/exchangeInfo").json()
     symbols = [
-        s['symbol'] for s in exchange_info['symbols']
-        if s['quoteAsset'] == 'USDT'
-        and s['status'] == 'TRADING'
-        and not s['symbol'].endswith("UPUSDT")
-        and not s['symbol'].endswith("DOWNUSDT")
+        s["symbol"] for s in exchange["symbols"]
+        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING"
+        and not s["symbol"].endswith("UPUSDT")
+        and not s["symbol"].endswith("DOWNUSDT")
     ]
 
     for symbol in symbols:
@@ -147,4 +136,4 @@ def main():
 if __name__ == "__main__":
     while True:
         main()
-        time.sleep(900)  # كل 15 دقيقة
+        time.sleep(900)
