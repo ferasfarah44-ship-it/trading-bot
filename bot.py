@@ -3,9 +3,9 @@ import time
 import requests
 from datetime import datetime
 
-# =========================
-# LOAD ENV VARIABLES
-# =========================
+# ==============================
+# ENV VARIABLES
+# ==============================
 
 TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
 TELEGRAM_CHAT_ID = os.getenv("7960335113")
@@ -13,102 +13,113 @@ TELEGRAM_CHAT_ID = os.getenv("7960335113")
 print("Loaded TOKEN:", TELEGRAM_TOKEN is not None)
 print("Loaded CHAT_ID:", TELEGRAM_CHAT_ID is not None)
 
-# =========================
-# TELEGRAM FUNCTION
-# =========================
+# ==============================
+# TELEGRAM SEND FUNCTION
+# ==============================
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("Telegram not configured")
         return
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
-    }
-
     try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        payload = {
+            "chat_id": TELEGRAM_CHAT_ID,
+            "text": message
+        }
         requests.post(url, data=payload, timeout=10)
     except Exception as e:
-        print("Telegram Error:", e)
+        print("Telegram error:", e)
 
-# =========================
-# BINANCE DATA
-# =========================
+# ==============================
+# GET 150 USDT PAIRS SAFE
+# ==============================
 
 def get_usdt_pairs():
-    url = "https://api.binance.com/api/v3/exchangeInfo"
-    data = requests.get(url).json()
+    try:
+        url = "https://api.binance.com/api/v3/exchangeInfo"
+        response = requests.get(url, timeout=10)
 
-    symbols = []
-    for s in data["symbols"]:
-        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
-            symbols.append(s["symbol"])
+        if response.status_code != 200:
+            print("Binance API error:", response.status_code)
+            return []
 
-    return symbols[:150]   # 150 عملة
+        data = response.json()
 
-def get_klines(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=50"
-    return requests.get(url).json()
+        if "symbols" not in data:
+            print("Unexpected Binance response")
+            return []
 
-# =========================
-# SIMPLE BREAKOUT LOGIC
-# =========================
+        pairs = []
+        for s in data["symbols"]:
+            if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
+                pairs.append(s["symbol"])
 
-def check_signal(symbol):
-    klines = get_klines(symbol)
+        return pairs[:150]
 
-    closes = [float(k[4]) for k in klines]
-    volumes = [float(k[5]) for k in klines]
+    except Exception as e:
+        print("Error fetching pairs:", e)
+        return []
 
-    last_close = closes[-1]
-    prev_high = max(closes[-10:-1])
-    avg_volume = sum(volumes[-20:-1]) / 19
-    last_volume = volumes[-1]
+# ==============================
+# SIMPLE SCAN LOGIC
+# ==============================
 
-    if last_close > prev_high and last_volume > avg_volume * 1.5:
-        entry = last_close
-        tp1 = round(entry * 1.02, 6)
-        tp2 = round(entry * 1.04, 6)
-        tp3 = round(entry * 1.06, 6)
+def scan_market():
+    pairs = get_usdt_pairs()
 
-        message = f"""
-🚀 Breakout Signal
+    if not pairs:
+        print("No pairs fetched")
+        return
 
-Symbol: {symbol}
-Entry: {entry}
+    print(f"Scanning {len(pairs)} pairs")
 
-TP1: {tp1} (2%)
-TP2: {tp2} (4%)
-TP3: {tp3} (6%)
+    for symbol in pairs:
+        try:
+            url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
+            r = requests.get(url, timeout=5)
 
-Time: {datetime.now().strftime('%H:%M:%S')}
-"""
-        send_telegram(message)
+            if r.status_code != 200:
+                continue
 
-# =========================
+            data = r.json()
+
+            change = float(data["priceChangePercent"])
+
+            # شرط بسيط غير صارم ولا خفيف
+            if 2.5 < change < 6:
+                price = data["lastPrice"]
+
+                message = (
+                    f"🚀 فرصة محتملة\n"
+                    f"{symbol}\n"
+                    f"السعر الحالي: {price}\n"
+                    f"نسبة الارتفاع 24h: {round(change,2)}%\n"
+                    f"فحص: {datetime.now().strftime('%H:%M')}"
+                )
+
+                send_telegram(message)
+
+        except:
+            continue
+
+# ==============================
 # MAIN LOOP
-# =========================
+# ==============================
 
 def main():
-    send_telegram("🚀 Bot Started")
+    send_telegram("✅ البوت اشتغل وبدأ الفحص")
 
     last_heartbeat = time.time()
 
     while True:
         print("New scan cycle")
-        symbols = get_usdt_pairs()
+        scan_market()
 
-        for symbol in symbols:
-            try:
-                check_signal(symbol)
-            except:
-                pass
-
-        # Heartbeat every hour
-        if time.time() - last_heartbeat > 3600:
-            send_telegram("🟢 Bot Running - Still Scanning")
+        # رسالة كل ساعة
+        if time.time() - last_heartbeat >= 3600:
+            send_telegram("💚 البوت شغال ويفحص السوق")
             last_heartbeat = time.time()
 
         time.sleep(300)  # كل 5 دقائق
