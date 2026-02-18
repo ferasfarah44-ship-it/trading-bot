@@ -1,4 +1,4 @@
-python-binance
-requests
 pandas
-pandas_ta
+numpy
+requests
+python-binance
