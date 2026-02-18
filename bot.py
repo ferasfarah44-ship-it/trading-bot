@@ -1,146 +1,91 @@
-import requests
-import time
 import os
-from datetime import datetime
+import time
+import requests
 import pandas as pd
+from binance.client import Client
+from datetime import datetime
 
-# ===============================
-# ENV
-# ===============================
-TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
-TELEGRAM_CHAT_ID = os.getenv("7960335113")
+# --- الإعدادات (يفضل وضعها في Environment Variables في Railway) ---
+API_KEY = os.getenv('BINANCE_API_KEY')
+API_SECRET = os.getenv('BINANCE_API_SECRET')
+TELEGRAM_TOKEN = os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE')
+CHAT_ID = os.getenv('7960335113')
 
-SCAN_INTERVAL = 300        # 5 minutes
-HEARTBEAT_INTERVAL = 3600  # 1 hour
-MAX_COINS = 150
+client = Client(API_KEY, API_SECRET)
 
-last_heartbeat = time.time()
+# قائمة تقريبية للعملات (يمكنك تحديثها حسب الفلتر الشرعي الخاص بك)
+HALAL_COINS = ['BTC', 'ETH', 'ADA', 'DOT', 'MATIC', 'SOL', 'ALGO', 'AVAX'] 
 
-# ===============================
-# TELEGRAM
-# ===============================
-def send_telegram(message):
-    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-        print("Telegram not configured")
-        return
-    
+def send_telegram_msg(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": message
+        "chat_id": CHAT_ID,
+        "text": message,
+        "parse_mode": "Markdown" # لجعل الخط مرتباً وقابلًا للقراءة
     }
     try:
-        requests.post(url, data=payload, timeout=10)
+        requests.post(url, json=payload)
     except Exception as e:
-        print("Telegram error:", e)
+        print(f"Error sending to Telegram: {e}")
 
-# ===============================
-# GET USDT PAIRS
-# ===============================
-def get_usdt_pairs():
-    url = "https://api.binance.com/api/v3/exchangeInfo"
-    data = requests.get(url).json()
-    symbols = []
-    for s in data["symbols"]:
-        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
-            symbols.append(s["symbol"])
-    return symbols[:MAX_COINS]
-
-# ===============================
-# GET KLINES
-# ===============================
-def get_klines(symbol, interval="5m", limit=100):
-    url = "https://api.binance.com/api/v3/klines"
-    params = {
-        "symbol": symbol,
-        "interval": interval,
-        "limit": limit
-    }
-    data = requests.get(url, params=params).json()
-    df = pd.DataFrame(data)
-    df = df.iloc[:, :6]
-    df.columns = ["time","open","high","low","close","volume"]
-    df["close"] = df["close"].astype(float)
-    df["volume"] = df["volume"].astype(float)
-    df["high"] = df["high"].astype(float)
-    return df
-
-# ===============================
-# RSI
-# ===============================
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
-
-# ===============================
-# SIGNAL CHECK
-# ===============================
-def check_signal(symbol):
-    df = get_klines(symbol)
-    
-    df["ema20"] = df["close"].ewm(span=20).mean()
-    df["ema50"] = df["close"].ewm(span=50).mean()
-    df["rsi"] = calculate_rsi(df["close"])
-    df["vol_avg"] = df["volume"].rolling(20).mean()
-    
-    last = df.iloc[-1]
-    prev_high = df["high"].iloc[-21:-1].max()
-    
-    cond1 = last["close"] > last["ema20"]
-    cond2 = last["ema20"] > last["ema50"]
-    cond3 = 52 < last["rsi"] < 68
-    cond4 = last["volume"] > last["vol_avg"] * 1.3
-    cond5 = last["close"] > prev_high
-    
-    if cond1 and cond2 and cond3 and cond4 and cond5:
-        entry = last["close"]
-        target1 = entry * 1.02
-        target2 = entry * 1.04
-        stop = entry * 0.98
+def get_analysis(symbol):
+    """تحليل بسيط للعملة لإعطاء سعر دخول وأهداف"""
+    try:
+        klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=50)
+        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'])
+        close_prices = df['close'].astype(float)
         
-        message = (
-            f"🚀 SIGNAL: {symbol}\n"
-            f"Entry: {entry:.6f}\n"
-            f"TP1: {target1:.6f} (+2%)\n"
-            f"TP2: {target2:.6f} (+4%)\n"
-            f"Stop: {stop:.6f} (-2%)"
-        )
-        send_telegram(message)
+        current_price = close_prices.iloc[-1]
+        # استراتيجية بسيطة: الدخول عند السعر الحالي، الأهداف بناءً على نسبة مئوية
+        entry_price = current_price
+        target1 = entry_price * 1.02 # هدف 2%
+        target2 = entry_price * 1.05 # هدف 5%
+        stop_loss = entry_price * 0.97 # وقف 3%
 
-# ===============================
-# MAIN LOOP
-# ===============================
-def main():
-    global last_heartbeat
+        return entry_price, target1, target2, stop_loss
+    except:
+        return None
+
+def scan_market():
+    """البحث عن فرص في العملات المختارة"""
+    findings = []
+    for coin in HALAL_COINS:
+        symbol = coin + "USDT"
+        # هنا يمكنك إضافة شروط إضافية (مثل RSI أو حجم التداول)
+        analysis = get_analysis(symbol)
+        if analysis:
+            entry, t1, t2, sl = analysis
+            msg = (
+                f"🚀 *فرصة جديدة: {coin}/USDT*\n\n"
+                f"💰 *سعر الدخول:* `{entry:.4f}`\n"
+                f"🎯 *الهدف الأول:* `{t1:.4f}`\n"
+                f"🎯 *الهدف الثاني:* `{t2:.4f}`\n"
+                f"🚫 *وقف الخسارة:* `{sl:.4f}`\n\n"
+                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+            )
+            findings.append(msg)
+    return findings
+
+# --- الحلقة الرئيسية ---
+if __name__ == "__main__":
+    send_telegram_msg("✅ *تم تشغيل البوت بنجاح!*\nسيتم الفحص كل 5 دقائق وإرسال تقرير حالة كل ساعة.")
     
-    send_telegram("🚀 Trading Bot Started")
+    last_heartbeat = time.time()
     
     while True:
         try:
-            print("New scan cycle:", datetime.now())
-            symbols = get_usdt_pairs()
+            # 1. فحص الفرص كل 5 دقائق
+            opportunities = scan_market()
+            for op in opportunities:
+                send_telegram_msg(op)
             
-            for symbol in symbols:
-                try:
-                    check_signal(symbol)
-                except:
-                    continue
-            
-            # heartbeat
-            if time.time() - last_heartbeat > HEARTBEAT_INTERVAL:
-                send_telegram("✅ Bot running and scanning every 5 minutes")
+            # 2. رسالة الحالة كل ساعة (3600 ثانية)
+            if time.time() - last_heartbeat >= 3600:
+                send_telegram_msg("🤖 *تحديث الحالة:* البوت يعمل الآن ويراقب السوق بنشاط.")
                 last_heartbeat = time.time()
+                
+            time.sleep(300) # انتظار 5 دقائق
             
         except Exception as e:
-            print("Main loop error:", e)
-        
-        time.sleep(SCAN_INTERVAL)
-
-if __name__ == "__main__":
-    main()
+            print(f"Error in loop: {e}")
+            time.sleep(60)
