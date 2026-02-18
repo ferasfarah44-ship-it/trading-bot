@@ -14,14 +14,14 @@ ENABLE_MOMENTUM = True
 SCAN_INTERVAL = 15
 HEARTBEAT_INTERVAL = 300
 
-BINANCE_URL = "https://api.binance.com/api/v3/klines"
-SYMBOLS_URL = "https://api.binance.com/api/v3/ticker/24hr"
+BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
+BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/24hr"
 
 TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
 TELEGRAM_CHAT_ID = os.getenv("7960335113")
 
 sent_signals = set()
-last_heartbeat = 0
+last_heartbeat = time.time()
 
 
 # ==============================
@@ -29,16 +29,21 @@ last_heartbeat = 0
 # ==============================
 
 def send_telegram(message):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("Telegram ENV missing")
+        return
+
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": message,
         "parse_mode": "HTML"
     }
+
     try:
         requests.post(url, data=payload, timeout=10)
-    except:
-        pass
+    except Exception as e:
+        print("Telegram error:", e)
 
 
 # ==============================
@@ -49,10 +54,13 @@ def calculate_rsi(series, period=14):
     delta = series.diff()
     gain = delta.clip(lower=0)
     loss = -delta.clip(upper=0)
+
     avg_gain = gain.rolling(period).mean()
     avg_loss = loss.rolling(period).mean()
+
     rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
 
 
 # ==============================
@@ -60,29 +68,43 @@ def calculate_rsi(series, period=14):
 # ==============================
 
 def get_symbols():
-    data = requests.get(SYMBOLS_URL).json()
-    symbols = []
-    for s in data:
-        if s["symbol"].endswith("USDT") and float(s["quoteVolume"]) > 5000000:
-            symbols.append(s["symbol"])
-    return symbols
+    try:
+        data = requests.get(BINANCE_TICKER, timeout=10).json()
+        symbols = []
+        for s in data:
+            if (
+                s["symbol"].endswith("USDT")
+                and float(s["quoteVolume"]) > 5000000
+                and "UP" not in s["symbol"]
+                and "DOWN" not in s["symbol"]
+            ):
+                symbols.append(s["symbol"])
+        return symbols[:200]
+    except:
+        return []
 
 
 def get_klines(symbol):
-    params = {
-        "symbol": symbol,
-        "interval": "5m",
-        "limit": 50
-    }
-    data = requests.get(BINANCE_URL, params=params).json()
-    df = pd.DataFrame(data)
-    df = df.iloc[:, 0:6]
-    df.columns = ["time", "open", "high", "low", "close", "volume"]
-    df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["volume"] = df["volume"].astype(float)
-    return df
+    try:
+        params = {
+            "symbol": symbol,
+            "interval": "5m",
+            "limit": 50
+        }
+        data = requests.get(BINANCE_KLINES, params=params, timeout=10).json()
+
+        df = pd.DataFrame(data)
+        df = df.iloc[:, 0:6]
+        df.columns = ["time", "open", "high", "low", "close", "volume"]
+
+        df["close"] = df["close"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["volume"] = df["volume"].astype(float)
+
+        return df
+    except:
+        return None
 
 
 # ==============================
@@ -128,6 +150,17 @@ def calculate_targets(df):
     return entry, resistance, stop, tp_percent, sl_percent
 
 
+def send_signal(symbol, mode, entry, tp, sl, tp_percent):
+    message = (
+        f"🚨 <b>{mode}</b>\n"
+        f"💎 {symbol}\n"
+        f"💰 Entry: {entry:.5f}\n"
+        f"🎯 Target: {tp:.5f} ({tp_percent:.2f}%)\n"
+        f"🛑 Stop: {sl:.5f}"
+    )
+    send_telegram(message)
+
+
 # ==============================
 # ===== MAIN SCAN =============
 # ==============================
@@ -136,6 +169,9 @@ def scan_market():
     symbols = get_symbols()
     for symbol in symbols:
         df = get_klines(symbol)
+        if df is None:
+            continue
+
         entry, tp, sl, tp_percent, sl_percent = calculate_targets(df)
 
         if ENABLE_PULLBACK and check_pullback(df):
@@ -157,17 +193,6 @@ def scan_market():
                 sent_signals.add(signal_id)
 
 
-def send_signal(symbol, mode, entry, tp, sl, tp_percent):
-    message = (
-        f"🚨 <b>{mode}</b>\n"
-        f"💎 {symbol}\n"
-        f"💰 Entry: {entry:.5f}\n"
-        f"🎯 Target: {tp:.5f} ({tp_percent:.2f}%)\n"
-        f"🛑 Stop: {sl:.5f}"
-    )
-    send_telegram(message)
-
-
 # ==============================
 # ===== RUN ====================
 # ==============================
@@ -185,7 +210,6 @@ if __name__ == "__main__":
             scan_market()
 
             now = time.time()
-            global last_heartbeat
             if now - last_heartbeat > HEARTBEAT_INTERVAL:
                 send_telegram("✅ البوت يعمل ويفحص السوق...")
                 last_heartbeat = now
