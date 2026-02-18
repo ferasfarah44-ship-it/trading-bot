@@ -9,7 +9,7 @@ TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
 CHAT_ID = os.getenv("7960335113")
 
 COOLDOWN_MINUTES = 45
-MIN_RR = 1.5  # أقل نسبة ربح/مخاطرة مقبولة
+MIN_RR = 1.5
 
 sent_signals = {}
 breakout_memory = {}
@@ -20,20 +20,24 @@ def send_telegram(message):
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": CHAT_ID, "text": message}
         requests.post(url, data=data, timeout=10)
-    except:
-        pass
+        print("Signal sent to Telegram")
+    except Exception as e:
+        print("Telegram error:", e)
 
 # ========= SAFE REQUEST =========
 def safe_request(url):
     try:
         r = requests.get(url, timeout=10)
         if r.status_code != 200:
+            print("Request failed:", r.status_code)
             return None
         data = r.json()
         if isinstance(data, dict) and "code" in data:
+            print("Binance error:", data)
             return None
         return data
-    except:
+    except Exception as e:
+        print("Request exception:", e)
         return None
 
 # ========= GET KLINES =========
@@ -58,9 +62,7 @@ def analyze(symbol):
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # ======================
-    # PHASE 1: DETECT MOMENTUM START
-    # ======================
+    # ===== PHASE 1: DETECT MOMENTUM =====
     rsi_cross = prev["rsi"] < 50 and last["rsi"] > 50
     volume_spike = last["volume"] > 2 * df["volume"].rolling(20).mean().iloc[-1]
     micro_break = last["close"] > df["high"][-7:-1].max()
@@ -69,20 +71,18 @@ def analyze(symbol):
         breakout_memory[symbol] = {
             "high_break": last["high"],
             "volume_break": last["volume"],
-            "break_low": df["low"][-7:-1].min(),  # قاع الهيكل القصير
+            "break_low": df["low"][-7:-1].min(),
             "time": datetime.now()
         }
+        print(f"{symbol} breakout detected")
 
-    # ======================
-    # PHASE 2: PULLBACK ENTRY
-    # ======================
+    # ===== PHASE 2: WAIT PULLBACK =====
     if symbol in breakout_memory:
         data = breakout_memory[symbol]
         high_break = data["high_break"]
         volume_break = data["volume_break"]
         structure_low = data["break_low"]
 
-        # منطقة الرجوع 1% - 2%
         pullback_low = high_break * 0.98
         pullback_high = high_break * 0.99
 
@@ -98,9 +98,8 @@ def analyze(symbol):
                     return
 
             entry = last["close"]
-
-            # ========= STOP LOSS من الهيكل =========
             stop = structure_low
+
             if stop >= entry:
                 return
 
@@ -108,7 +107,7 @@ def analyze(symbol):
             if risk <= 0:
                 return
 
-            # ========= TARGET 1 = أقرب مقاومة =========
+            # ===== TARGET 1: NEAREST RESISTANCE =====
             recent_highs = df["high"][-40:]
             resistance = recent_highs[recent_highs > entry].min()
 
@@ -117,27 +116,26 @@ def analyze(symbol):
 
             target1 = resistance
 
-            # ========= TARGET 2 = Measured Move =========
+            # ===== TARGET 2: MEASURED MOVE =====
             measured_move = high_break - structure_low
             target2 = entry + measured_move
 
-            # ========= فلتر RR =========
             rr = (target1 - entry) / risk
 
             if rr < MIN_RR:
+                print(f"{symbol} rejected due to low RR")
                 return
 
             message = f"""
 🚀 {symbol}
 
 Entry: {round(entry,4)}
-Stop (Structure Low): {round(stop,4)}
+Stop: {round(stop,4)}
 
-Target 1 (Resistance): {round(target1,4)}
-Target 2 (Measured Move): {round(target2,4)}
+Target1 (Resistance): {round(target1,4)}
+Target2 (Measured Move): {round(target2,4)}
 
-Risk/Reward: {round(rr,2)}
-Strategy: Momentum + Pullback + Structure
+RR: {round(rr,2)}
 """
 
             send_telegram(message)
@@ -146,8 +144,10 @@ Strategy: Momentum + Pullback + Structure
 
 # ========= MAIN LOOP =========
 def main():
+    print("---- New Scan Cycle ----")
     exchange = safe_request("https://api.binance.com/api/v3/exchangeInfo")
     if not exchange:
+        print("Exchange fetch failed")
         return
 
     symbols = [
@@ -158,8 +158,12 @@ def main():
         and not s["symbol"].endswith("DOWNUSDT")
     ]
 
+    print(f"Scanning {len(symbols)} symbols...")
+
     for symbol in symbols:
         analyze(symbol)
+
+    print("Cycle finished.\n")
 
 if __name__ == "__main__":
     while True:
