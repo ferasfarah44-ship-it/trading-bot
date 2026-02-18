@@ -1,174 +1,197 @@
-import os
-import time
 import requests
+import time
+import os
 import pandas as pd
-import ta
-from datetime import datetime, timedelta
 
-# ====== CONFIG ======
+# ==============================
+# ====== SETTINGS =============
+# ==============================
+
 ENABLE_PULLBACK = True
 ENABLE_REVERSAL = True
 ENABLE_MOMENTUM = True
 
-COOLDOWN_MINUTES = 40
-MIN_RR = 1.3
+SCAN_INTERVAL = 15
+HEARTBEAT_INTERVAL = 300
+
+BINANCE_URL = "https://api.binance.com/api/v3/klines"
+SYMBOLS_URL = "https://api.binance.com/api/v3/ticker/24hr"
 
 TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
-CHAT_ID = os.getenv("7960335113")
+TELEGRAM_CHAT_ID = os.getenv("7960335113")
 
-sent_signals = {}
+sent_signals = set()
+last_heartbeat = 0
 
-# ================= TELEGRAM =================
+
+# ==============================
+# ===== TELEGRAM ==============
+# ==============================
+
 def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {
+        "chat_id": TELEGRAM_CHAT_ID,
+        "text": message,
+        "parse_mode": "HTML"
+    }
     try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": message}
-        requests.post(url, data=data, timeout=10)
-        print("Signal sent")
-    except Exception as e:
-        print("Telegram error:", e)
-
-# ================= REQUEST =================
-def safe_request(url):
-    try:
-        r = requests.get(url, timeout=8)
-        if r.status_code != 200:
-            return None
-        return r.json()
+        requests.post(url, data=payload, timeout=10)
     except:
-        return None
+        pass
 
-# ================= ANALYZE =================
-def analyze(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=120"
-    klines = safe_request(url)
-    if not klines:
-        return
 
-    df = pd.DataFrame(klines)
-    df["close"] = df[4].astype(float)
-    df["high"] = df[2].astype(float)
-    df["low"] = df[3].astype(float)
-    df["volume"] = df[5].astype(float)
+# ==============================
+# ===== INDICATORS ============
+# ==============================
 
-    df["rsi"] = ta.momentum.rsi(df["close"], window=14)
-    df["ma25"] = df["close"].rolling(25).mean()
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.rolling(period).mean()
+    avg_loss = loss.rolling(period).mean()
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
-    last = df.iloc[-1]
-    prev = df.iloc[-2]
 
-    now = datetime.now()
-    if symbol in sent_signals:
-        if now - sent_signals[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
-            return
+# ==============================
+# ===== DATA FETCH ============
+# ==============================
 
-    volume_avg = df["volume"].rolling(20).mean().iloc[-1]
+def get_symbols():
+    data = requests.get(SYMBOLS_URL).json()
+    symbols = []
+    for s in data:
+        if s["symbol"].endswith("USDT") and float(s["quoteVolume"]) > 5000000:
+            symbols.append(s["symbol"])
+    return symbols
 
-    # ================= PULLBACK MODE =================
-    if ENABLE_PULLBACK:
-        rsi_cross = prev["rsi"] < 50 and last["rsi"] > 50
-        volume_spike = last["volume"] > 2 * volume_avg
-        breakout = last["close"] > df["high"][-7:-1].max()
 
-        if rsi_cross and volume_spike and breakout:
-            high_break = last["high"]
-            pullback_zone = high_break * 0.985
+def get_klines(symbol):
+    params = {
+        "symbol": symbol,
+        "interval": "5m",
+        "limit": 50
+    }
+    data = requests.get(BINANCE_URL, params=params).json()
+    df = pd.DataFrame(data)
+    df = df.iloc[:, 0:6]
+    df.columns = ["time", "open", "high", "low", "close", "volume"]
+    df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["volume"] = df["volume"].astype(float)
+    return df
 
-            if last["close"] <= pullback_zone and last["rsi"] > 50:
-                stop = df["low"][-7:-1].min()
-                risk = last["close"] - stop
-                if risk <= 0:
-                    return
 
-                target = last["close"] + (risk * 1.5)
-                rr = (target - last["close"]) / risk
+# ==============================
+# ===== MODES =================
+# ==============================
 
-                if rr >= MIN_RR:
-                    message = f"""
-🟢 PULLBACK SIGNAL
-{symbol}
+def check_pullback(df):
+    rsi = calculate_rsi(df["close"]).iloc[-1]
+    volume_spike = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-1] * 2
+    breakout = df["close"].iloc[-1] > df["high"].iloc[-6:-1].max()
+    return rsi > 50 and volume_spike and breakout
 
-Entry: {round(last['close'],4)}
-Stop: {round(stop,4)}
-Target: {round(target,4)}
-RR: {round(rr,2)}
-"""
-                    send_telegram(message)
-                    sent_signals[symbol] = now
-                    return
 
-    # ================= MOMENTUM MODE =================
-    if ENABLE_MOMENTUM:
-        body_percent = abs(last["close"] - prev["close"]) / prev["close"] * 100
-        strong_volume = last["volume"] > 3 * volume_avg
-        breakout10 = last["close"] > df["high"][-11:-1].max()
+def check_momentum(df):
+    body = abs(df["close"].iloc[-1] - df["close"].iloc[-2])
+    body_percent = (body / df["close"].iloc[-2]) * 100
+    volume_spike = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-1] * 3
+    rsi = calculate_rsi(df["close"]).iloc[-1]
+    return body_percent > 4 and volume_spike and 55 < rsi < 80
 
-        if body_percent >= 4 and strong_volume and breakout10 and 55 < last["rsi"] < 80:
-            stop = last["close"] * 0.975
-            risk = last["close"] - stop
-            target = last["close"] + (risk * 1.3)
 
-            message = f"""
-🔴 MOMENTUM SIGNAL
-{symbol}
+def check_reversal(df):
+    rsi_series = calculate_rsi(df["close"])
+    rsi_now = rsi_series.iloc[-1]
+    rsi_prev = rsi_series.iloc[-3]
+    ma25 = df["close"].rolling(25).mean().iloc[-1]
+    volume_spike = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-1] * 1.5
+    return rsi_prev < 40 and rsi_now > 50 and df["close"].iloc[-1] > ma25 and volume_spike
 
-Entry: {round(last['close'],4)}
-Stop: {round(stop,4)}
-Target: {round(target,4)}
-"""
-            send_telegram(message)
-            sent_signals[symbol] = now
-            return
 
-    # ================= REVERSAL MODE =================
-    if ENABLE_REVERSAL:
-        rsi_reversal = prev["rsi"] < 40 and last["rsi"] > 50
-        ma_break = last["close"] > last["ma25"]
-        volume_ok = last["volume"] > 1.5 * volume_avg
+# ==============================
+# ===== TARGET LOGIC ==========
+# ==============================
 
-        if rsi_reversal and ma_break and volume_ok:
-            stop = df["low"][-10:-1].min()
-            risk = last["close"] - stop
-            if risk <= 0:
-                return
+def calculate_targets(df):
+    entry = df["close"].iloc[-1]
+    resistance = df["high"].iloc[-10:-1].max()
+    stop = df["low"].iloc[-5:-1].min()
 
-            target = last["close"] + (risk * 1.5)
+    tp_percent = ((resistance - entry) / entry) * 100
+    sl_percent = ((entry - stop) / entry) * 100
 
-            message = f"""
-🟡 REVERSAL SIGNAL
-{symbol}
+    return entry, resistance, stop, tp_percent, sl_percent
 
-Entry: {round(last['close'],4)}
-Stop: {round(stop,4)}
-Target: {round(target,4)}
-"""
-            send_telegram(message)
-            sent_signals[symbol] = now
-            return
 
-# ================= MAIN LOOP =================
-def main():
-    print("New scan cycle")
-    exchange = safe_request("https://api.binance.com/api/v3/exchangeInfo")
-    if not exchange:
-        return
+# ==============================
+# ===== MAIN SCAN =============
+# ==============================
 
-    symbols = [
-        s["symbol"] for s in exchange["symbols"]
-        if s["quoteAsset"] == "USDT"
-        and s["status"] == "TRADING"
-        and not s["symbol"].endswith("UPUSDT")
-        and not s["symbol"].endswith("DOWNUSDT")
-    ]
+def scan_market():
+    symbols = get_symbols()
+    for symbol in symbols:
+        df = get_klines(symbol)
+        entry, tp, sl, tp_percent, sl_percent = calculate_targets(df)
 
-    for symbol in symbols[:250]:
-        analyze(symbol)
+        if ENABLE_PULLBACK and check_pullback(df):
+            signal_id = f"{symbol}_pullback"
+            if signal_id not in sent_signals:
+                send_signal(symbol, "PULLBACK", entry, tp, sl, tp_percent)
+                sent_signals.add(signal_id)
+
+        if ENABLE_MOMENTUM and check_momentum(df):
+            signal_id = f"{symbol}_momentum"
+            if signal_id not in sent_signals:
+                send_signal(symbol, "MOMENTUM", entry, tp, sl, tp_percent)
+                sent_signals.add(signal_id)
+
+        if ENABLE_REVERSAL and check_reversal(df):
+            signal_id = f"{symbol}_reversal"
+            if signal_id not in sent_signals:
+                send_signal(symbol, "REVERSAL", entry, tp, sl, tp_percent)
+                sent_signals.add(signal_id)
+
+
+def send_signal(symbol, mode, entry, tp, sl, tp_percent):
+    message = (
+        f"🚨 <b>{mode}</b>\n"
+        f"💎 {symbol}\n"
+        f"💰 Entry: {entry:.5f}\n"
+        f"🎯 Target: {tp:.5f} ({tp_percent:.2f}%)\n"
+        f"🛑 Stop: {sl:.5f}"
+    )
+    send_telegram(message)
+
+
+# ==============================
+# ===== RUN ====================
+# ==============================
 
 if __name__ == "__main__":
+    send_telegram(
+        "🚀 Bot Started Successfully\n"
+        f"Pullback: {ENABLE_PULLBACK}\n"
+        f"Reversal: {ENABLE_REVERSAL}\n"
+        f"Momentum: {ENABLE_MOMENTUM}"
+    )
+
     while True:
         try:
-            main()
-            time.sleep(300)
+            scan_market()
+
+            now = time.time()
+            global last_heartbeat
+            if now - last_heartbeat > HEARTBEAT_INTERVAL:
+                send_telegram("✅ البوت يعمل ويفحص السوق...")
+                last_heartbeat = now
+
+            time.sleep(SCAN_INTERVAL)
+
         except Exception as e:
-            print("Crash prevented:", e)
-            time.sleep(10)
+            print("ERROR:", e)
+            time.sleep(5)
