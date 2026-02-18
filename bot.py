@@ -5,149 +5,152 @@ import pandas as pd
 import ta
 from datetime import datetime, timedelta
 
+# ====== CONFIG ======
+ENABLE_PULLBACK = True
+ENABLE_REVERSAL = True
+ENABLE_MOMENTUM = True
+
+COOLDOWN_MINUTES = 40
+MIN_RR = 1.3
+
 TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
 CHAT_ID = os.getenv("7960335113")
 
-COOLDOWN_MINUTES = 45
-MIN_RR = 1.5
-
 sent_signals = {}
-breakout_memory = {}
 
-# ========= TELEGRAM =========
+# ================= TELEGRAM =================
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
         data = {"chat_id": CHAT_ID, "text": message}
         requests.post(url, data=data, timeout=10)
-        print("Signal sent to Telegram")
+        print("Signal sent")
     except Exception as e:
         print("Telegram error:", e)
 
-# ========= SAFE REQUEST =========
+# ================= REQUEST =================
 def safe_request(url):
     try:
-        r = requests.get(url, timeout=10)
+        r = requests.get(url, timeout=8)
         if r.status_code != 200:
-            print("Request failed:", r.status_code)
             return None
-        data = r.json()
-        if isinstance(data, dict) and "code" in data:
-            print("Binance error:", data)
-            return None
-        return data
-    except Exception as e:
-        print("Request exception:", e)
+        return r.json()
+    except:
         return None
 
-# ========= GET KLINES =========
-def get_klines(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=120"
-    return safe_request(url)
-
-# ========= ANALYZE =========
+# ================= ANALYZE =================
 def analyze(symbol):
-    klines = get_klines(symbol)
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=120"
+    klines = safe_request(url)
     if not klines:
         return
 
     df = pd.DataFrame(klines)
-
     df["close"] = df[4].astype(float)
     df["high"] = df[2].astype(float)
     df["low"] = df[3].astype(float)
     df["volume"] = df[5].astype(float)
+
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
+    df["ma25"] = df["close"].rolling(25).mean()
 
     last = df.iloc[-1]
     prev = df.iloc[-2]
 
-    # ===== PHASE 1: DETECT MOMENTUM =====
-    rsi_cross = prev["rsi"] < 50 and last["rsi"] > 50
-    volume_spike = last["volume"] > 2 * df["volume"].rolling(20).mean().iloc[-1]
-    micro_break = last["close"] > df["high"][-7:-1].max()
+    now = datetime.now()
+    if symbol in sent_signals:
+        if now - sent_signals[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
+            return
 
-    if rsi_cross and volume_spike and micro_break:
-        breakout_memory[symbol] = {
-            "high_break": last["high"],
-            "volume_break": last["volume"],
-            "break_low": df["low"][-7:-1].min(),
-            "time": datetime.now()
-        }
-        print(f"{symbol} breakout detected")
+    volume_avg = df["volume"].rolling(20).mean().iloc[-1]
 
-    # ===== PHASE 2: WAIT PULLBACK =====
-    if symbol in breakout_memory:
-        data = breakout_memory[symbol]
-        high_break = data["high_break"]
-        volume_break = data["volume_break"]
-        structure_low = data["break_low"]
+    # ================= PULLBACK MODE =================
+    if ENABLE_PULLBACK:
+        rsi_cross = prev["rsi"] < 50 and last["rsi"] > 50
+        volume_spike = last["volume"] > 2 * volume_avg
+        breakout = last["close"] > df["high"][-7:-1].max()
 
-        pullback_low = high_break * 0.98
-        pullback_high = high_break * 0.99
+        if rsi_cross and volume_spike and breakout:
+            high_break = last["high"]
+            pullback_zone = high_break * 0.985
 
-        in_pullback = pullback_low <= last["close"] <= pullback_high
-        rsi_ok = last["rsi"] > 50
-        low_volume_pullback = last["volume"] < volume_break
-
-        if in_pullback and rsi_ok and low_volume_pullback:
-
-            now = datetime.now()
-            if symbol in sent_signals:
-                if now - sent_signals[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
+            if last["close"] <= pullback_zone and last["rsi"] > 50:
+                stop = df["low"][-7:-1].min()
+                risk = last["close"] - stop
+                if risk <= 0:
                     return
 
-            entry = last["close"]
-            stop = structure_low
+                target = last["close"] + (risk * 1.5)
+                rr = (target - last["close"]) / risk
 
-            if stop >= entry:
-                return
+                if rr >= MIN_RR:
+                    message = f"""
+🟢 PULLBACK SIGNAL
+{symbol}
 
-            risk = entry - stop
+Entry: {round(last['close'],4)}
+Stop: {round(stop,4)}
+Target: {round(target,4)}
+RR: {round(rr,2)}
+"""
+                    send_telegram(message)
+                    sent_signals[symbol] = now
+                    return
+
+    # ================= MOMENTUM MODE =================
+    if ENABLE_MOMENTUM:
+        body_percent = abs(last["close"] - prev["close"]) / prev["close"] * 100
+        strong_volume = last["volume"] > 3 * volume_avg
+        breakout10 = last["close"] > df["high"][-11:-1].max()
+
+        if body_percent >= 4 and strong_volume and breakout10 and 55 < last["rsi"] < 80:
+            stop = last["close"] * 0.975
+            risk = last["close"] - stop
+            target = last["close"] + (risk * 1.3)
+
+            message = f"""
+🔴 MOMENTUM SIGNAL
+{symbol}
+
+Entry: {round(last['close'],4)}
+Stop: {round(stop,4)}
+Target: {round(target,4)}
+"""
+            send_telegram(message)
+            sent_signals[symbol] = now
+            return
+
+    # ================= REVERSAL MODE =================
+    if ENABLE_REVERSAL:
+        rsi_reversal = prev["rsi"] < 40 and last["rsi"] > 50
+        ma_break = last["close"] > last["ma25"]
+        volume_ok = last["volume"] > 1.5 * volume_avg
+
+        if rsi_reversal and ma_break and volume_ok:
+            stop = df["low"][-10:-1].min()
+            risk = last["close"] - stop
             if risk <= 0:
                 return
 
-            # ===== TARGET 1: NEAREST RESISTANCE =====
-            recent_highs = df["high"][-40:]
-            resistance = recent_highs[recent_highs > entry].min()
-
-            if pd.isna(resistance):
-                return
-
-            target1 = resistance
-
-            # ===== TARGET 2: MEASURED MOVE =====
-            measured_move = high_break - structure_low
-            target2 = entry + measured_move
-
-            rr = (target1 - entry) / risk
-
-            if rr < MIN_RR:
-                print(f"{symbol} rejected due to low RR")
-                return
+            target = last["close"] + (risk * 1.5)
 
             message = f"""
-🚀 {symbol}
+🟡 REVERSAL SIGNAL
+{symbol}
 
-Entry: {round(entry,4)}
+Entry: {round(last['close'],4)}
 Stop: {round(stop,4)}
-
-Target1 (Resistance): {round(target1,4)}
-Target2 (Measured Move): {round(target2,4)}
-
-RR: {round(rr,2)}
+Target: {round(target,4)}
 """
-
             send_telegram(message)
             sent_signals[symbol] = now
-            del breakout_memory[symbol]
+            return
 
-# ========= MAIN LOOP =========
+# ================= MAIN LOOP =================
 def main():
-    print("---- New Scan Cycle ----")
+    print("New scan cycle")
     exchange = safe_request("https://api.binance.com/api/v3/exchangeInfo")
     if not exchange:
-        print("Exchange fetch failed")
         return
 
     symbols = [
@@ -158,14 +161,14 @@ def main():
         and not s["symbol"].endswith("DOWNUSDT")
     ]
 
-    print(f"Scanning {len(symbols)} symbols...")
-
-    for symbol in symbols:
+    for symbol in symbols[:250]:
         analyze(symbol)
-
-    print("Cycle finished.\n")
 
 if __name__ == "__main__":
     while True:
-        main()
-        time.sleep(300)
+        try:
+            main()
+            time.sleep(300)
+        except Exception as e:
+            print("Crash prevented:", e)
+            time.sleep(10)
