@@ -3,16 +3,14 @@ import time
 import os
 import pandas as pd
 
-# ==============================
-# ====== SETTINGS =============
-# ==============================
+# ================= SETTINGS =================
 
 ENABLE_PULLBACK = True
-ENABLE_REVERSAL = True
 ENABLE_MOMENTUM = True
+ENABLE_REVERSAL = True
 
-SCAN_INTERVAL = 15
-HEARTBEAT_INTERVAL = 300
+SCAN_INTERVAL = 300        # 5 دقائق
+HEARTBEAT_INTERVAL = 3600  # ساعة
 
 BINANCE_KLINES = "https://api.binance.com/api/v3/klines"
 BINANCE_TICKER = "https://api.binance.com/api/v3/ticker/24hr"
@@ -23,10 +21,7 @@ TELEGRAM_CHAT_ID = os.getenv("7960335113")
 sent_signals = set()
 last_heartbeat = time.time()
 
-
-# ==============================
-# ===== TELEGRAM ==============
-# ==============================
+# ================= TELEGRAM =================
 
 def send_telegram(message):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -41,14 +36,12 @@ def send_telegram(message):
     }
 
     try:
-        requests.post(url, data=payload, timeout=10)
+        response = requests.post(url, data=payload, timeout=10)
+        print("Telegram:", response.status_code)
     except Exception as e:
         print("Telegram error:", e)
 
-
-# ==============================
-# ===== INDICATORS ============
-# ==============================
+# ================= RSI =================
 
 def calculate_rsi(series, period=14):
     delta = series.diff()
@@ -59,13 +52,9 @@ def calculate_rsi(series, period=14):
     avg_loss = loss.rolling(period).mean()
 
     rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-    return rsi
+    return 100 - (100 / (1 + rs))
 
-
-# ==============================
-# ===== DATA FETCH ============
-# ==============================
+# ================= DATA =================
 
 def get_symbols():
     try:
@@ -79,10 +68,9 @@ def get_symbols():
                 and "DOWN" not in s["symbol"]
             ):
                 symbols.append(s["symbol"])
-        return symbols[:200]
+        return symbols[:150]   # 🔥 150 عملة
     except:
         return []
-
 
 def get_klines(symbol):
     try:
@@ -106,10 +94,7 @@ def get_klines(symbol):
     except:
         return None
 
-
-# ==============================
-# ===== MODES =================
-# ==============================
+# ================= MODES =================
 
 def check_pullback(df):
     rsi = calculate_rsi(df["close"]).iloc[-1]
@@ -117,14 +102,12 @@ def check_pullback(df):
     breakout = df["close"].iloc[-1] > df["high"].iloc[-6:-1].max()
     return rsi > 50 and volume_spike and breakout
 
-
 def check_momentum(df):
     body = abs(df["close"].iloc[-1] - df["close"].iloc[-2])
     body_percent = (body / df["close"].iloc[-2]) * 100
     volume_spike = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-1] * 3
     rsi = calculate_rsi(df["close"]).iloc[-1]
     return body_percent > 4 and volume_spike and 55 < rsi < 80
-
 
 def check_reversal(df):
     rsi_series = calculate_rsi(df["close"])
@@ -134,21 +117,14 @@ def check_reversal(df):
     volume_spike = df["volume"].iloc[-1] > df["volume"].rolling(20).mean().iloc[-1] * 1.5
     return rsi_prev < 40 and rsi_now > 50 and df["close"].iloc[-1] > ma25 and volume_spike
 
-
-# ==============================
-# ===== TARGET LOGIC ==========
-# ==============================
+# ================= TARGET =================
 
 def calculate_targets(df):
     entry = df["close"].iloc[-1]
     resistance = df["high"].iloc[-10:-1].max()
     stop = df["low"].iloc[-5:-1].min()
-
     tp_percent = ((resistance - entry) / entry) * 100
-    sl_percent = ((entry - stop) / entry) * 100
-
-    return entry, resistance, stop, tp_percent, sl_percent
-
+    return entry, resistance, stop, tp_percent
 
 def send_signal(symbol, mode, entry, tp, sl, tp_percent):
     message = (
@@ -160,19 +136,18 @@ def send_signal(symbol, mode, entry, tp, sl, tp_percent):
     )
     send_telegram(message)
 
-
-# ==============================
-# ===== MAIN SCAN =============
-# ==============================
+# ================= SCAN =================
 
 def scan_market():
+    print("New scan cycle")
     symbols = get_symbols()
+
     for symbol in symbols:
         df = get_klines(symbol)
         if df is None:
             continue
 
-        entry, tp, sl, tp_percent, sl_percent = calculate_targets(df)
+        entry, tp, sl, tp_percent = calculate_targets(df)
 
         if ENABLE_PULLBACK and check_pullback(df):
             signal_id = f"{symbol}_pullback"
@@ -192,17 +167,15 @@ def scan_market():
                 send_signal(symbol, "REVERSAL", entry, tp, sl, tp_percent)
                 sent_signals.add(signal_id)
 
-
-# ==============================
-# ===== RUN ====================
-# ==============================
+# ================= RUN =================
 
 if __name__ == "__main__":
+
     send_telegram(
-        "🚀 Bot Started Successfully\n"
+        "🚀 Bot Started\n"
         f"Pullback: {ENABLE_PULLBACK}\n"
-        f"Reversal: {ENABLE_REVERSAL}\n"
-        f"Momentum: {ENABLE_MOMENTUM}"
+        f"Momentum: {ENABLE_MOMENTUM}\n"
+        f"Reversal: {ENABLE_REVERSAL}"
     )
 
     while True:
@@ -218,4 +191,4 @@ if __name__ == "__main__":
 
         except Exception as e:
             print("ERROR:", e)
-            time.sleep(5)
+            time.sleep(10)
