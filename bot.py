@@ -2,90 +2,74 @@ import os
 import time
 import requests
 import pandas as pd
+import pandas_ta as ta
 from binance.client import Client
 from datetime import datetime
 
-# --- الإعدادات (يفضل وضعها في Environment Variables في Railway) ---
+# --- الإعدادات من Variables ---
 API_KEY = os.getenv('BINANCE_API_KEY')
 API_SECRET = os.getenv('BINANCE_API_SECRET')
 TELEGRAM_TOKEN = os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE')
 CHAT_ID = os.getenv('7960335113')
 
+# محاولة تجاوز حظر الموقع باستخدام رابط بديل
 client = Client(API_KEY, API_SECRET)
+client.API_URL = 'https://api1.binance.com/api' 
 
-# قائمة تقريبية للعملات (يمكنك تحديثها حسب الفلتر الشرعي الخاص بك)
-HALAL_COINS = ['BTC', 'ETH', 'ADA', 'DOT', 'MATIC', 'SOL', 'ALGO', 'AVAX'] 
+# قائمة العملات المتوافقة (حسب تفضيلك السابق)
+HALAL_COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'DOTUSDT']
 
-def send_telegram_msg(message):
+def send_telegram(message):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": CHAT_ID,
-        "text": message,
-        "parse_mode": "Markdown" # لجعل الخط مرتباً وقابلًا للقراءة
-    }
+    # التنسيق MarkdownV2 يجعل الخط عريضاً والأرقام واضحة
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "MarkdownV2"}
     try:
         requests.post(url, json=payload)
-    except Exception as e:
-        print(f"Error sending to Telegram: {e}")
+    except:
+        pass
 
-def get_analysis(symbol):
-    """تحليل بسيط للعملة لإعطاء سعر دخول وأهداف"""
+def get_signal(symbol):
     try:
-        klines = client.get_klines(symbol=symbol, interval=Client.KLINE_INTERVAL_15MINUTE, limit=50)
-        df = pd.DataFrame(klines, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'])
-        close_prices = df['close'].astype(float)
+        bars = client.get_klines(symbol=symbol, interval='15m', limit=100)
+        df = pd.DataFrame(bars, columns=['date','open','high','low','close','vol','ct','qa','nt','tb','tq','i'])
+        df['close'] = df['close'].astype(float)
+        df['RSI'] = ta.rsi(df['close'], length=14)
         
-        current_price = close_prices.iloc[-1]
-        # استراتيجية بسيطة: الدخول عند السعر الحالي، الأهداف بناءً على نسبة مئوية
-        entry_price = current_price
-        target1 = entry_price * 1.02 # هدف 2%
-        target2 = entry_price * 1.05 # هدف 5%
-        stop_loss = entry_price * 0.97 # وقف 3%
+        current_price = df['close'].iloc[-1]
+        rsi_val = df['RSI'].iloc[-1]
 
-        return entry_price, target1, target2, stop_loss
+        # شرط دخول بسيط (تشبع بيعي)
+        if rsi_val < 35:
+            return {
+                "entry": current_price,
+                "t1": current_price * 1.02,
+                "sl": current_price * 0.98
+            }
+        return None
     except:
         return None
 
-def scan_market():
-    """البحث عن فرص في العملات المختارة"""
-    findings = []
-    for coin in HALAL_COINS:
-        symbol = coin + "USDT"
-        # هنا يمكنك إضافة شروط إضافية (مثل RSI أو حجم التداول)
-        analysis = get_analysis(symbol)
-        if analysis:
-            entry, t1, t2, sl = analysis
-            msg = (
-                f"🚀 *فرصة جديدة: {coin}/USDT*\n\n"
-                f"💰 *سعر الدخول:* `{entry:.4f}`\n"
-                f"🎯 *الهدف الأول:* `{t1:.4f}`\n"
-                f"🎯 *الهدف الثاني:* `{t2:.4f}`\n"
-                f"🚫 *وقف الخسارة:* `{sl:.4f}`\n\n"
-                f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-            )
-            findings.append(msg)
-    return findings
-
-# --- الحلقة الرئيسية ---
 if __name__ == "__main__":
-    send_telegram_msg("✅ *تم تشغيل البوت بنجاح!*\nسيتم الفحص كل 5 دقائق وإرسال تقرير حالة كل ساعة.")
+    send_telegram("🚀 *تم بدء تشغيل البوت بنجاح*")
     
     last_heartbeat = time.time()
     
     while True:
         try:
-            # 1. فحص الفرص كل 5 دقائق
-            opportunities = scan_market()
-            for op in opportunities:
-                send_telegram_msg(op)
+            # فحص كل 5 دقائق
+            for coin in HALAL_COINS:
+                data = get_signal(coin)
+                if data:
+                    # تنسيق مريح للعين مع معالجة النقاط لتناسب تلجرام
+                    entry = str(data['entry']).replace('.', '\.')
+                    msg = f"✅ *إشارة جديدة: {coin}*\n💰 السعر: `{entry}`"
+                    send_telegram(msg)
             
-            # 2. رسالة الحالة كل ساعة (3600 ثانية)
+            # رسالة كل ساعة للتأكد أن البوت يعمل
             if time.time() - last_heartbeat >= 3600:
-                send_telegram_msg("🤖 *تحديث الحالة:* البوت يعمل الآن ويراقب السوق بنشاط.")
+                send_telegram("🤖 *تحديث:* البوت ما زال يعمل ويفحص السوق\.")
                 last_heartbeat = time.time()
                 
             time.sleep(300) # انتظار 5 دقائق
-            
         except Exception as e:
-            print(f"Error in loop: {e}")
             time.sleep(60)
