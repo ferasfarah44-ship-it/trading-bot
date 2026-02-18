@@ -8,26 +8,22 @@ from datetime import datetime, timedelta
 TELEGRAM_TOKEN = os.getenv("8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE")
 CHAT_ID = os.getenv("7960335113")
 
-MIN_SCORE = 6
-MIN_VOLUME_24H = 5_000_000
-COOLDOWN_MINUTES = 60
+COOLDOWN_MINUTES = 45
+MIN_RR = 1.5  # أقل نسبة ربح/مخاطرة مقبولة
 
-sent_coins = {}
+sent_signals = {}
+breakout_memory = {}
 
-# ================= TELEGRAM =================
+# ========= TELEGRAM =========
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        data = {
-            "chat_id": CHAT_ID,
-            "text": message,
-            "parse_mode": "HTML"
-        }
+        data = {"chat_id": CHAT_ID, "text": message}
         requests.post(url, data=data, timeout=10)
     except:
         pass
 
-# ================= BINANCE REQUEST SAFE =================
+# ========= SAFE REQUEST =========
 def safe_request(url):
     try:
         r = requests.get(url, timeout=10)
@@ -40,121 +36,116 @@ def safe_request(url):
     except:
         return None
 
-# ================= GET KLINES =================
+# ========= GET KLINES =========
 def get_klines(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=120"
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=120"
     return safe_request(url)
 
-# ================= GET 24H DATA =================
-def get_ticker(symbol):
-    url = f"https://api.binance.com/api/v3/ticker/24hr?symbol={symbol}"
-    return safe_request(url)
-
-# ================= BTC FILTER =================
-def btc_trend_ok():
-    data = get_klines("BTCUSDT")
-    if not data:
-        return False
-
-    df = pd.DataFrame(data)
-    df["close"] = df[4].astype(float)
-    df["ma25"] = df["close"].rolling(25).mean()
-
-    last = df.iloc[-1]
-    return last["close"] > last["ma25"]
-
-# ================= ANALYZE =================
+# ========= ANALYZE =========
 def analyze(symbol):
-    ticker = get_ticker(symbol)
-    if not ticker:
-        return
-
-    try:
-        volume_24h = float(ticker["quoteVolume"])
-        change_24h = float(ticker["priceChangePercent"])
-    except:
-        return
-
-    if volume_24h < MIN_VOLUME_24H:
-        return
-
     klines = get_klines(symbol)
     if not klines:
         return
 
     df = pd.DataFrame(klines)
 
-    try:
-        df["close"] = df[4].astype(float)
-        df["high"] = df[2].astype(float)
-        df["volume"] = df[5].astype(float)
-    except:
-        return
-
-    df["ma7"] = df["close"].rolling(7).mean()
-    df["ma25"] = df["close"].rolling(25).mean()
-    df["ma99"] = df["close"].rolling(99).mean()
+    df["close"] = df[4].astype(float)
+    df["high"] = df[2].astype(float)
+    df["low"] = df[3].astype(float)
+    df["volume"] = df[5].astype(float)
     df["rsi"] = ta.momentum.rsi(df["close"], window=14)
 
     last = df.iloc[-1]
-    score = 0
+    prev = df.iloc[-2]
 
-    breakout = last["close"] > df["high"][-20:-1].max()
-    volume_break = last["volume"] > df["volume"].rolling(20).mean().iloc[-1]
-    trend_cross = last["ma7"] > last["ma25"]
-    above_ma99 = last["close"] > last["ma99"]
-    rsi_good = 50 < last["rsi"] < 72
-    change_ok = 2 < change_24h < 18
+    # ======================
+    # PHASE 1: DETECT MOMENTUM START
+    # ======================
+    rsi_cross = prev["rsi"] < 50 and last["rsi"] > 50
+    volume_spike = last["volume"] > 2 * df["volume"].rolling(20).mean().iloc[-1]
+    micro_break = last["close"] > df["high"][-7:-1].max()
 
-    if breakout:
-        score += 3
-    if volume_break:
-        score += 2
-    if trend_cross:
-        score += 2
-    if above_ma99:
-        score += 1
-    if rsi_good:
-        score += 1
-    if change_ok:
-        score += 1
+    if rsi_cross and volume_spike and micro_break:
+        breakout_memory[symbol] = {
+            "high_break": last["high"],
+            "volume_break": last["volume"],
+            "break_low": df["low"][-7:-1].min(),  # قاع الهيكل القصير
+            "time": datetime.now()
+        }
 
-    if score >= MIN_SCORE:
-        now = datetime.now()
+    # ======================
+    # PHASE 2: PULLBACK ENTRY
+    # ======================
+    if symbol in breakout_memory:
+        data = breakout_memory[symbol]
+        high_break = data["high_break"]
+        volume_break = data["volume_break"]
+        structure_low = data["break_low"]
 
-        if symbol in sent_coins:
-            if now - sent_coins[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
+        # منطقة الرجوع 1% - 2%
+        pullback_low = high_break * 0.98
+        pullback_high = high_break * 0.99
+
+        in_pullback = pullback_low <= last["close"] <= pullback_high
+        rsi_ok = last["rsi"] > 50
+        low_volume_pullback = last["volume"] < volume_break
+
+        if in_pullback and rsi_ok and low_volume_pullback:
+
+            now = datetime.now()
+            if symbol in sent_signals:
+                if now - sent_signals[symbol] < timedelta(minutes=COOLDOWN_MINUTES):
+                    return
+
+            entry = last["close"]
+
+            # ========= STOP LOSS من الهيكل =========
+            stop = structure_low
+            if stop >= entry:
                 return
 
-        entry = last["close"]
-        target1 = entry * 1.025
-        target2 = entry * 1.05
-        stop = entry * 0.97
-        rr = ((target2 - entry) / entry) * 100
+            risk = entry - stop
+            if risk <= 0:
+                return
 
-        message = f"""
-🔥 <b>{symbol}</b>
+            # ========= TARGET 1 = أقرب مقاومة =========
+            recent_highs = df["high"][-40:]
+            resistance = recent_highs[recent_highs > entry].min()
 
-السعر الحالي: {round(entry,4)}
+            if pd.isna(resistance):
+                return
 
-📌 دخول: {round(entry,4)}
-🎯 هدف 1: {round(target1,4)}
-🎯 هدف 2: {round(target2,4)}
-🛑 وقف: {round(stop,4)}
+            target1 = resistance
 
-📊 ربح محتمل: {round(rr,2)}%
-⭐ تقييم: {score}/10
-💰 حجم 24h: {round(volume_24h/1_000_000,2)}M
+            # ========= TARGET 2 = Measured Move =========
+            measured_move = high_break - structure_low
+            target2 = entry + measured_move
+
+            # ========= فلتر RR =========
+            rr = (target1 - entry) / risk
+
+            if rr < MIN_RR:
+                return
+
+            message = f"""
+🚀 {symbol}
+
+Entry: {round(entry,4)}
+Stop (Structure Low): {round(stop,4)}
+
+Target 1 (Resistance): {round(target1,4)}
+Target 2 (Measured Move): {round(target2,4)}
+
+Risk/Reward: {round(rr,2)}
+Strategy: Momentum + Pullback + Structure
 """
-        send_telegram(message)
-        sent_coins[symbol] = now
 
-# ================= MAIN LOOP =================
+            send_telegram(message)
+            sent_signals[symbol] = now
+            del breakout_memory[symbol]
+
+# ========= MAIN LOOP =========
 def main():
-    if not btc_trend_ok():
-        print("BTC trend negative, skipping cycle.")
-        return
-
     exchange = safe_request("https://api.binance.com/api/v3/exchangeInfo")
     if not exchange:
         return
@@ -173,4 +164,4 @@ def main():
 if __name__ == "__main__":
     while True:
         main()
-        time.sleep(900)
+        time.sleep(300)
