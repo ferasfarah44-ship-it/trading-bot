@@ -7,17 +7,32 @@ CHAT_ID = "7960335113"
 
 COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
 
+# ===== جلب بيانات الشموع =====
 def get_klines(symbol):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=150"
-    data = requests.get(url).json()
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            return None
 
-    df = pd.DataFrame(data)
-    df = df.iloc[:, :6]
-    df.columns = ['time','open','high','low','close','volume']
-    df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
+        data = response.json()
 
-    return df
+        if not isinstance(data, list) or len(data) == 0:
+            return None
 
+        df = pd.DataFrame(data)
+        df = df.iloc[:, :6]
+        df.columns = ['time','open','high','low','close','volume']
+        df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
+
+        return df
+
+    except:
+        return None
+
+
+# ===== حساب RSI =====
 def calculate_rsi(df, period=14):
     delta = df['close'].diff()
     gain = delta.clip(lower=0)
@@ -31,15 +46,23 @@ def calculate_rsi(df, period=14):
 
     return rsi
 
+
+# ===== إرسال رسالة =====
 def send_msg(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     requests.post(url, json={
         "chat_id": CHAT_ID,
-        "text": text
+        "text": text,
+        "parse_mode": "Markdown"
     })
 
+
+# ===== تحليل فرصة =====
 def analyze(symbol):
     df = get_klines(symbol)
+
+    if df is None:
+        return None
 
     df['ema9'] = df['close'].ewm(span=9).mean()
     df['ema21'] = df['close'].ewm(span=21).mean()
@@ -60,12 +83,13 @@ def analyze(symbol):
         rr = round((target - entry) / (entry - stop_loss), 2) if entry != stop_loss else 0
 
         message = (
-            f"🚀 Signal {symbol}\n\n"
-            f"Entry: {round(entry,6)}\n"
-            f"Target: {round(target,6)}\n"
-            f"Stop Loss: {round(stop_loss,6)}\n"
-            f"RSI: {round(last['rsi'],2)}\n"
-            f"R/R: {rr}"
+            f"🚀 *فرصة سكالبينغ*\n\n"
+            f"💎 العملة: `{symbol}`\n"
+            f"📍 الدخول: `{round(entry,6)}`\n"
+            f"🎯 الهدف: `{round(target,6)}`\n"
+            f"🛑 وقف الخسارة: `{round(stop_loss,6)}`\n"
+            f"📊 RSI: `{round(last['rsi'],2)}`\n"
+            f"⚖️ نسبة العائد: `{rr}`"
         )
 
         return message
@@ -73,8 +97,9 @@ def analyze(symbol):
     return None
 
 
+# ===== التشغيل =====
 if __name__ == "__main__":
-    send_msg("Bot started successfully - 5m scalping mode")
+    send_msg("🚀 *تم تشغيل البوت بنجاح*\n📊 وضع سكالبينغ 5 دقائق")
     last_ping = time.time()
 
     while True:
@@ -84,12 +109,12 @@ if __name__ == "__main__":
                 if signal:
                     send_msg(signal)
 
+            # رسالة تأكيد كل ساعة
             if time.time() - last_ping >= 3600:
-                send_msg("Bot is running normally.")
+                send_msg("🤖 *البوت يعمل بشكل طبيعي ويتم الفحص كل 5 دقائق*")
                 last_ping = time.time()
 
             time.sleep(300)
 
-        except Exception as e:
-            send_msg(f"Error: {e}")
+        except:
             time.sleep(60)
