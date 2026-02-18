@@ -2,74 +2,45 @@ import os
 import time
 import requests
 import pandas as pd
-import pandas_ta as ta
 from binance.client import Client
 from datetime import datetime
 
-# --- الإعدادات من Variables ---
+# --- المتغيرات ---
 API_KEY = os.getenv('BINANCE_API_KEY')
 API_SECRET = os.getenv('BINANCE_API_SECRET')
 TELEGRAM_TOKEN = os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE')
 CHAT_ID = os.getenv('7960335113')
 
-# محاولة تجاوز حظر الموقع باستخدام رابط بديل
+# محاولة تجاوز حظر Railway باستخدام روابط API بديلة
 client = Client(API_KEY, API_SECRET)
-client.API_URL = 'https://api1.binance.com/api' 
+client.API_URL = 'https://api1.binance.com/api' # تجربة رابط api1 أو api2 أو api3
 
-# قائمة العملات المتوافقة (حسب تفضيلك السابق)
-HALAL_COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT', 'DOTUSDT']
+HALAL_COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
 
-def send_telegram(message):
+def send_msg(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    # التنسيق MarkdownV2 يجعل الخط عريضاً والأرقام واضحة
-    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "MarkdownV2"}
-    try:
-        requests.post(url, json=payload)
-    except:
-        pass
-
-def get_signal(symbol):
-    try:
-        bars = client.get_klines(symbol=symbol, interval='15m', limit=100)
-        df = pd.DataFrame(bars, columns=['date','open','high','low','close','vol','ct','qa','nt','tb','tq','i'])
-        df['close'] = df['close'].astype(float)
-        df['RSI'] = ta.rsi(df['close'], length=14)
-        
-        current_price = df['close'].iloc[-1]
-        rsi_val = df['RSI'].iloc[-1]
-
-        # شرط دخول بسيط (تشبع بيعي)
-        if rsi_val < 35:
-            return {
-                "entry": current_price,
-                "t1": current_price * 1.02,
-                "sl": current_price * 0.98
-            }
-        return None
-    except:
-        return None
+    # استخدام Markdown لجعل الخط مريح للقراءة
+    requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
 
 if __name__ == "__main__":
-    send_telegram("🚀 *تم بدء تشغيل البوت بنجاح*")
-    
-    last_heartbeat = time.time()
-    
+    send_msg("🚀 *تم بدء تشغيل البوت بنجاح*")
+    last_ping = time.time()
+
     while True:
         try:
-            # فحص كل 5 دقائق
+            # الفحص كل 5 دقائق
             for coin in HALAL_COINS:
-                data = get_signal(coin)
-                if data:
-                    # تنسيق مريح للعين مع معالجة النقاط لتناسب تلجرام
-                    entry = str(data['entry']).replace('.', '\.')
-                    msg = f"✅ *إشارة جديدة: {coin}*\n💰 السعر: `{entry}`"
-                    send_telegram(msg)
-            
+                ticker = client.get_symbol_ticker(symbol=coin)
+                price = ticker['price']
+                # هنا يمكنك إضافة تحليلك، سأرسل السعر كمثال بسيط
+                # send_msg(f"📊 العملة: *{coin}*\n💰 السعر الحالي: `{price}`")
+
             # رسالة كل ساعة للتأكد أن البوت يعمل
-            if time.time() - last_heartbeat >= 3600:
-                send_telegram("🤖 *تحديث:* البوت ما زال يعمل ويفحص السوق\.")
-                last_heartbeat = time.time()
-                
-            time.sleep(300) # انتظار 5 دقائق
+            if time.time() - last_ping >= 3600:
+                send_msg("🤖 *تحديث:* البوت مستمر في الفحص الدوري\.")
+                last_ping = time.time()
+
+            time.sleep(300) 
         except Exception as e:
+            print(f"Error: {e}")
             time.sleep(60)
