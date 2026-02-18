@@ -1,4 +1,4 @@
-pandas
-numpy
-python-telegram-bot
+python-binance
 requests
+pandas
+pandas_ta
