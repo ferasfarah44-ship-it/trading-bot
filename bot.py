@@ -7,7 +7,6 @@ BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
 CHAT_ID = "7960335113"
 
 INTERVAL = "15m"
-CHECK_INTERVAL = 300
 BASE_URL = "https://data-api.binance.vision"
 
 sent_signals = {}
@@ -15,16 +14,18 @@ sent_signals = {}
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
-    except:
-        pass
+        r = requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
+        print("تم إرسال تنبيه")
+    except Exception as e:
+        print("خطأ تلجرام:", e)
 
 def get_usdt_pairs():
     try:
         url = f"{BASE_URL}/api/v3/ticker/price"
         data = requests.get(url, timeout=10).json()
         return [x["symbol"] for x in data if x["symbol"].endswith("USDT")]
-    except:
+    except Exception as e:
+        print("خطأ تحميل الأزواج:", e)
         return []
 
 def get_klines(symbol):
@@ -60,7 +61,6 @@ def check_cross(symbol):
     df["MA5"] = df["close"].rolling(5).mean()
     df["MA25"] = df["close"].rolling(25).mean()
     df["VOL_MA20"] = df["volume"].rolling(20).mean()
-
     df.dropna(inplace=True)
 
     if len(df) < 5:
@@ -94,12 +94,11 @@ def check_cross(symbol):
         return
 
     rr = round((target - entry) / (entry - stop), 2)
-
     if rr < 1.5:
         return
 
     message = f"""
-🚀 تقاطع صعودي قوي MA5 / MA25
+🚀 تقاطع صعودي قوي
 
 {symbol}
 
@@ -108,7 +107,6 @@ def check_cross(symbol):
 🛑 الوقف: {stop}
 ⚖ R/R: {rr}
 
-🔥 فلترة احترافية عالية
 ⏰ {datetime.datetime.now().strftime("%H:%M")}
 """
     send_telegram(message)
@@ -118,22 +116,20 @@ print("تم تشغيل البوت:", datetime.datetime.now())
 
 while True:
 
-    SYMBOLS = get_usdt_pairs()
+    print("=== بداية دورة ===", datetime.datetime.now())
 
-    if not SYMBOLS:
-        print("فشل تحميل الأزواج")
-        time.sleep(10)
+    symbols = get_usdt_pairs()
+
+    if not symbols:
+        time.sleep(30)
         continue
 
-    print("عدد الأزواج:", len(SYMBOLS))
-
-    for symbol in SYMBOLS:
+    for symbol in symbols:
         try:
             check_cross(symbol)
-        except:
-            pass
+            time.sleep(0.8)   # مهم جداً لمنع الضغط والانهيار
+        except Exception as e:
+            print("خطأ في زوج:", symbol, e)
 
-    for i in range(CHECK_INTERVAL):
-        time.sleep(1)
-        if i % 60 == 0:
-            print("يعمل...", datetime.datetime.now())
+    print("=== نهاية دورة ===", datetime.datetime.now())
+    time.sleep(300)
