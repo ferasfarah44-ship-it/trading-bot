@@ -13,13 +13,16 @@ SWING_LOOKBACK = 20
 sent_signals = {}
 
 def send_telegram(message):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    data = {"chat_id": CHAT_ID, "text": message}
-    requests.post(url, data=data)
+    try:
+        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+        data = {"chat_id": CHAT_ID, "text": message}
+        requests.post(url, data=data, timeout=10)
+    except:
+        pass
 
 def get_all_usdt_pairs():
     url = "https://api.binance.com/api/v3/exchangeInfo"
-    data = requests.get(url).json()
+    data = requests.get(url, timeout=10).json()
     symbols = []
     for s in data["symbols"]:
         if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
@@ -27,21 +30,29 @@ def get_all_usdt_pairs():
     return symbols
 
 def get_klines(symbol):
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": INTERVAL, "limit": 200}
-    response = requests.get(url, params=params)
-    data = response.json()
+    try:
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": INTERVAL, "limit": 200}
+        response = requests.get(url, params=params, timeout=10)
+        data = response.json()
 
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "_","_","_","_","_","_"
-    ])
+        if not isinstance(data, list):
+            return None
 
-    df["close"] = df["close"].astype(float)
-    df["high"] = df["high"].astype(float)
-    df["low"] = df["low"].astype(float)
+        df = pd.DataFrame(data, columns=[
+            "time","open","high","low","close","volume",
+            "_","_","_","_","_","_"
+        ])
 
-    return df
+        df["close"] = pd.to_numeric(df["close"], errors="coerce")
+        df["high"] = pd.to_numeric(df["high"], errors="coerce")
+        df["low"] = pd.to_numeric(df["low"], errors="coerce")
+
+        df.dropna(inplace=True)
+
+        return df
+    except:
+        return None
 
 def find_swing_high(df):
     return df.tail(SWING_LOOKBACK)["high"].max()
@@ -54,8 +65,16 @@ def check_cross(symbol):
 
     df = get_klines(symbol)
 
+    if df is None or len(df) < 30:
+        return
+
     df["MA5"] = df["close"].rolling(5).mean()
     df["MA25"] = df["close"].rolling(25).mean()
+
+    df.dropna(inplace=True)
+
+    if len(df) < 2:
+        return
 
     prev = df.iloc[-2]
     curr = df.iloc[-1]
@@ -101,9 +120,10 @@ while True:
     for symbol in SYMBOLS:
         try:
             check_cross(symbol)
-        except:
-            pass
+        except Exception as e:
+            print("خطأ في", symbol)
 
+    # نبضات لمنع النوم
     for i in range(CHECK_INTERVAL):
         time.sleep(1)
         if i % 60 == 0:
