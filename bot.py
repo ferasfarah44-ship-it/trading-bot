@@ -30,7 +30,7 @@ def get_usdt_pairs():
 def get_klines(symbol):
     try:
         url = f"{BASE_URL}/api/v3/klines"
-        params = {"symbol": symbol, "interval": INTERVAL, "limit": 120}
+        params = {"symbol": symbol, "interval": INTERVAL, "limit": 150}
         data = requests.get(url, params=params, timeout=10).json()
 
         if not isinstance(data, list):
@@ -54,7 +54,7 @@ def check_cross(symbol):
     global sent_signals
 
     df = get_klines(symbol)
-    if df is None or len(df) < 50:
+    if df is None or len(df) < 60:
         return
 
     df["MA5"] = df["close"].rolling(5).mean()
@@ -63,18 +63,20 @@ def check_cross(symbol):
 
     df.dropna(inplace=True)
 
-    if len(df) < 2:
+    if len(df) < 5:
         return
 
     prev = df.iloc[-2]
     curr = df.iloc[-1]
+    m3 = df.iloc[-3]
+    m4 = df.iloc[-4]
 
     bullish_cross = (
         prev["MA5"] < prev["MA25"] and
         curr["MA5"] > curr["MA25"] and
         curr["close"] > curr["MA25"] and
-        curr["MA5"] > prev["MA5"] and
-        curr["MA25"] > prev["MA25"] and
+        curr["MA5"] > prev["MA5"] > m3["MA5"] and
+        curr["MA25"] > prev["MA25"] > m3["MA25"] > m4["MA25"] and
         curr["volume"] > curr["VOL_MA20"]
     )
 
@@ -97,7 +99,7 @@ def check_cross(symbol):
         return
 
     message = f"""
-🚀 تقاطع قوي MA5 / MA25
+🚀 تقاطع صعودي قوي MA5 / MA25
 
 {symbol}
 
@@ -106,7 +108,7 @@ def check_cross(symbol):
 🛑 الوقف: {stop}
 ⚖ R/R: {rr}
 
-🔥 فلترة احترافية
+🔥 فلترة احترافية عالية
 ⏰ {datetime.datetime.now().strftime("%H:%M")}
 """
     send_telegram(message)
