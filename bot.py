@@ -10,7 +10,7 @@ CHAT_ID = "7960335113"
 SYMBOLS = ["ZROUSDT", "C98USDT", "OGUSDT"]
 INTERVAL = "15m"
 CHECK_INTERVAL = 300  # كل 5 دقائق
-SWING_LOOKBACK = 20   # عدد الشموع للبحث عن سوينج
+SWING_LOOKBACK = 20
 
 # =======================
 
@@ -53,7 +53,6 @@ def check_cross(symbol):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
 
-    # تقاطع صعودي
     if prev["MA5"] < prev["MA25"] and curr["MA5"] > curr["MA25"]:
 
         entry = curr["close"]
@@ -77,11 +76,18 @@ def check_cross(symbol):
 """
         send_telegram(message)
 
+print("تم تشغيل البوت:", datetime.datetime.now())
+
 while True:
     for symbol in SYMBOLS:
         try:
+            print("فحص:", symbol, datetime.datetime.now())
             check_cross(symbol)
         except Exception as e:
             print(f"خطأ في {symbol}: {e}")
 
-    time.sleep(CHECK_INTERVAL)
+    # بدل sleep طويل نخليه نبضات قصيرة
+    for i in range(CHECK_INTERVAL):
+        time.sleep(1)
+        if i % 60 == 0:
+            print("يعمل...", datetime.datetime.now())
