@@ -1,120 +1,87 @@
-import time
 import requests
 import pandas as pd
+import time
+import datetime
 
-TELEGRAM_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
+# ====== إعداداتك ======
+BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
 CHAT_ID = "7960335113"
 
-COINS = ['BTCUSDT', 'ETHUSDT', 'SOLUSDT', 'ADAUSDT']
+SYMBOLS = ["ZROUSDT", "C98USDT", "OGUSDT"]
+INTERVAL = "15m"
+CHECK_INTERVAL = 300  # كل 5 دقائق
+SWING_LOOKBACK = 20   # عدد الشموع للبحث عن سوينج
 
-# ===== جلب بيانات الشموع =====
+# =======================
+
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": message}
+    requests.post(url, data=data)
+
 def get_klines(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=5m&limit=150"
-    
-    try:
-        response = requests.get(url, timeout=10)
-        if response.status_code != 200:
-            return None
+    url = "https://api.binance.com/api/v3/klines"
+    params = {"symbol": symbol, "interval": INTERVAL, "limit": 200}
+    response = requests.get(url, params=params)
+    data = response.json()
 
-        data = response.json()
+    df = pd.DataFrame(data, columns=[
+        "time","open","high","low","close","volume",
+        "_","_","_","_","_","_"
+    ])
 
-        if not isinstance(data, list) or len(data) == 0:
-            return None
+    df["close"] = df["close"].astype(float)
+    df["high"] = df["high"].astype(float)
+    df["low"] = df["low"].astype(float)
 
-        df = pd.DataFrame(data)
-        df = df.iloc[:, :6]
-        df.columns = ['time','open','high','low','close','volume']
-        df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
+    return df
 
-        return df
+def find_swing_high(df):
+    recent = df.tail(SWING_LOOKBACK)
+    return recent["high"].max()
 
-    except:
-        return None
+def find_swing_low(df):
+    recent = df.tail(SWING_LOOKBACK)
+    return recent["low"].min()
 
-
-# ===== حساب RSI =====
-def calculate_rsi(df, period=14):
-    delta = df['close'].diff()
-    gain = delta.clip(lower=0)
-    loss = -delta.clip(upper=0)
-
-    avg_gain = gain.rolling(period).mean()
-    avg_loss = loss.rolling(period).mean()
-
-    rs = avg_gain / avg_loss
-    rsi = 100 - (100 / (1 + rs))
-
-    return rsi
-
-
-# ===== إرسال رسالة =====
-def send_msg(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, json={
-        "chat_id": CHAT_ID,
-        "text": text,
-        "parse_mode": "Markdown"
-    })
-
-
-# ===== تحليل فرصة =====
-def analyze(symbol):
+def check_cross(symbol):
     df = get_klines(symbol)
 
-    if df is None:
-        return None
+    df["MA5"] = df["close"].rolling(5).mean()
+    df["MA25"] = df["close"].rolling(25).mean()
 
-    df['ema9'] = df['close'].ewm(span=9).mean()
-    df['ema21'] = df['close'].ewm(span=21).mean()
-    df['rsi'] = calculate_rsi(df)
-
-    last = df.iloc[-1]
     prev = df.iloc[-2]
+    curr = df.iloc[-1]
 
-    if prev['ema9'] < prev['ema21'] and last['ema9'] > last['ema21'] and last['rsi'] > 50:
+    # تقاطع صعودي
+    if prev["MA5"] < prev["MA25"] and curr["MA5"] > curr["MA25"]:
 
-        entry = last['close']
-        resistance = df['high'].tail(20).max()
-        support = df['low'].tail(20).min()
+        entry = curr["close"]
+        target = find_swing_high(df)
+        stop = find_swing_low(df)
 
-        target = resistance
-        stop_loss = support
+        rr = round((target - entry) / (entry - stop), 2) if entry > stop else 0
 
-        rr = round((target - entry) / (entry - stop_loss), 2) if entry != stop_loss else 0
+        message = f"""
+🚀 إشارة تقاطع MA5 مع MA25
 
-        message = (
-            f"🚀 *فرصة سكالبينغ*\n\n"
-            f"💎 العملة: `{symbol}`\n"
-            f"📍 الدخول: `{round(entry,6)}`\n"
-            f"🎯 الهدف: `{round(target,6)}`\n"
-            f"🛑 وقف الخسارة: `{round(stop_loss,6)}`\n"
-            f"📊 RSI: `{round(last['rsi'],2)}`\n"
-            f"⚖️ نسبة العائد: `{rr}`"
-        )
+العملة: {symbol}
+الإطار: {INTERVAL}
 
-        return message
+📍 دخول: {entry:.5f}
+🎯 الهدف (Swing High): {target:.5f}
+🛑 وقف الخسارة (Swing Low): {stop:.5f}
+⚖ نسبة العائد/المخاطرة: {rr}
 
-    return None
+⏰ الوقت: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+"""
+        send_telegram(message)
 
-
-# ===== التشغيل =====
-if __name__ == "__main__":
-    send_msg("🚀 *تم تشغيل البوت بنجاح*\n📊 وضع سكالبينغ 5 دقائق")
-    last_ping = time.time()
-
-    while True:
+while True:
+    for symbol in SYMBOLS:
         try:
-            for coin in COINS:
-                signal = analyze(coin)
-                if signal:
-                    send_msg(signal)
+            check_cross(symbol)
+        except Exception as e:
+            print(f"خطأ في {symbol}: {e}")
 
-            # رسالة تأكيد كل ساعة
-            if time.time() - last_ping >= 3600:
-                send_msg("🤖 *البوت يعمل بشكل طبيعي ويتم الفحص كل 5 دقائق*")
-                last_ping = time.time()
-
-            time.sleep(300)
-
-        except:
-            time.sleep(60)
+    time.sleep(CHECK_INTERVAL)
