@@ -8,45 +8,32 @@ CHAT_ID = "7960335113"
 
 INTERVAL = "15m"
 CHECK_INTERVAL = 300
-SWING_LOOKBACK = 20
 
 sent_signals = {}
+
+BASE_URL = "https://data-api.binance.vision"
 
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": message}
-        requests.post(url, data=data, timeout=10)
+        requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
     except:
         pass
 
-def get_all_usdt_pairs():
+def get_usdt_pairs():
     try:
-        url = "https://api.binance.com/api/v3/exchangeInfo"
-        response = requests.get(url, timeout=10)
-        data = response.json()
-
-        if "symbols" not in data:
-            print("رد غير متوقع من Binance:", data)
-            return []
-
-        symbols = []
-        for s in data["symbols"]:
-            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
-                symbols.append(s["symbol"])
-
-        return symbols
-
-    except Exception as e:
-        print("فشل جلب الأزواج:", e)
+        url = f"{BASE_URL}/api/v3/ticker/price"
+        data = requests.get(url, timeout=10).json()
+        pairs = [x["symbol"] for x in data if x["symbol"].endswith("USDT")]
+        return pairs
+    except:
         return []
 
 def get_klines(symbol):
     try:
-        url = "https://api.binance.com/api/v3/klines"
-        params = {"symbol": symbol, "interval": INTERVAL, "limit": 200}
-        response = requests.get(url, params=params, timeout=10)
-        data = response.json()
+        url = f"{BASE_URL}/api/v3/klines"
+        params = {"symbol": symbol, "interval": INTERVAL, "limit": 100}
+        data = requests.get(url, params=params, timeout=10).json()
 
         if not isinstance(data, list):
             return None
@@ -56,34 +43,23 @@ def get_klines(symbol):
             "_","_","_","_","_","_"
         ])
 
-        df["close"] = pd.to_numeric(df["close"], errors="coerce")
-        df["high"] = pd.to_numeric(df["high"], errors="coerce")
-        df["low"] = pd.to_numeric(df["low"], errors="coerce")
-
-        df.dropna(inplace=True)
+        df["close"] = pd.to_numeric(df["close"])
+        df["high"] = pd.to_numeric(df["high"])
+        df["low"] = pd.to_numeric(df["low"])
 
         return df
-
     except:
         return None
-
-def find_swing_high(df):
-    return df.tail(SWING_LOOKBACK)["high"].max()
-
-def find_swing_low(df):
-    return df.tail(SWING_LOOKBACK)["low"].min()
 
 def check_cross(symbol):
     global sent_signals
 
     df = get_klines(symbol)
-
     if df is None or len(df) < 30:
         return
 
     df["MA5"] = df["close"].rolling(5).mean()
     df["MA25"] = df["close"].rolling(25).mean()
-
     df.dropna(inplace=True)
 
     if len(df) < 2:
@@ -94,14 +70,12 @@ def check_cross(symbol):
 
     if prev["MA5"] < prev["MA25"] and curr["MA5"] > curr["MA25"]:
 
-        last_time = curr["time"]
-
-        if symbol in sent_signals and sent_signals[symbol] == last_time:
+        if symbol in sent_signals and sent_signals[symbol] == curr["time"]:
             return
 
         entry = curr["close"]
-        target = find_swing_high(df)
-        stop = find_swing_low(df)
+        target = df["high"].tail(20).max()
+        stop = df["low"].tail(20).min()
 
         if entry <= stop:
             return
@@ -111,42 +85,37 @@ def check_cross(symbol):
         message = f"""
 🚀 تقاطع MA5 مع MA25
 
-العملة: {symbol}
-الإطار: {INTERVAL}
+{symbol}
 
 📍 دخول: {entry}
 🎯 الهدف: {target}
 🛑 الوقف: {stop}
 ⚖ R/R: {rr}
 
-⏰ {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+⏰ {datetime.datetime.now().strftime("%H:%M")}
 """
         send_telegram(message)
-        sent_signals[symbol] = last_time
-
+        sent_signals[symbol] = curr["time"]
 
 print("تم تشغيل البوت:", datetime.datetime.now())
 
-# تحميل الأزواج مع إعادة المحاولة
 while True:
-    SYMBOLS = get_all_usdt_pairs()
 
-    if SYMBOLS:
-        print("عدد الأزواج:", len(SYMBOLS))
-        break
-    else:
-        print("فشل تحميل الأزواج - إعادة المحاولة بعد 10 ثواني")
+    SYMBOLS = get_usdt_pairs()
+
+    if not SYMBOLS:
+        print("فشل تحميل الأزواج - إعادة المحاولة")
         time.sleep(10)
+        continue
 
-while True:
+    print("عدد الأزواج:", len(SYMBOLS))
 
     for symbol in SYMBOLS:
         try:
             check_cross(symbol)
-        except Exception as e:
-            print("خطأ في", symbol)
+        except:
+            pass
 
-    # نبضات منع النوم
     for i in range(CHECK_INTERVAL):
         time.sleep(1)
         if i % 60 == 0:
