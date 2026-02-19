@@ -3,21 +3,28 @@ import pandas as pd
 import time
 import datetime
 
-# ====== إعداداتك ======
 BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
 CHAT_ID = "7960335113"
 
-SYMBOLS = ["ZROUSDT", "C98USDT", "OGUSDT"]
 INTERVAL = "15m"
-CHECK_INTERVAL = 300  # كل 5 دقائق
+CHECK_INTERVAL = 300
 SWING_LOOKBACK = 20
 
-# =======================
+sent_signals = {}
 
 def send_telegram(message):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": message}
     requests.post(url, data=data)
+
+def get_all_usdt_pairs():
+    url = "https://api.binance.com/api/v3/exchangeInfo"
+    data = requests.get(url).json()
+    symbols = []
+    for s in data["symbols"]:
+        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
+            symbols.append(s["symbol"])
+    return symbols
 
 def get_klines(symbol):
     url = "https://api.binance.com/api/v3/klines"
@@ -37,14 +44,14 @@ def get_klines(symbol):
     return df
 
 def find_swing_high(df):
-    recent = df.tail(SWING_LOOKBACK)
-    return recent["high"].max()
+    return df.tail(SWING_LOOKBACK)["high"].max()
 
 def find_swing_low(df):
-    recent = df.tail(SWING_LOOKBACK)
-    return recent["low"].min()
+    return df.tail(SWING_LOOKBACK)["low"].min()
 
 def check_cross(symbol):
+    global sent_signals
+
     df = get_klines(symbol)
 
     df["MA5"] = df["close"].rolling(5).mean()
@@ -55,38 +62,48 @@ def check_cross(symbol):
 
     if prev["MA5"] < prev["MA25"] and curr["MA5"] > curr["MA25"]:
 
+        last_time = curr["time"]
+
+        if symbol in sent_signals and sent_signals[symbol] == last_time:
+            return
+
         entry = curr["close"]
         target = find_swing_high(df)
         stop = find_swing_low(df)
 
-        rr = round((target - entry) / (entry - stop), 2) if entry > stop else 0
+        if entry <= stop:
+            return
+
+        rr = round((target - entry) / (entry - stop), 2)
 
         message = f"""
-🚀 إشارة تقاطع MA5 مع MA25
+🚀 تقاطع MA5 مع MA25
 
 العملة: {symbol}
 الإطار: {INTERVAL}
 
-📍 دخول: {entry:.5f}
-🎯 الهدف (Swing High): {target:.5f}
-🛑 وقف الخسارة (Swing Low): {stop:.5f}
-⚖ نسبة العائد/المخاطرة: {rr}
+📍 دخول: {entry}
+🎯 الهدف: {target}
+🛑 الوقف: {stop}
+⚖ R/R: {rr}
 
-⏰ الوقت: {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
+⏰ {datetime.datetime.now().strftime("%Y-%m-%d %H:%M")}
 """
         send_telegram(message)
+        sent_signals[symbol] = last_time
 
 print("تم تشغيل البوت:", datetime.datetime.now())
+
+SYMBOLS = get_all_usdt_pairs()
+print("عدد الأزواج:", len(SYMBOLS))
 
 while True:
     for symbol in SYMBOLS:
         try:
-            print("فحص:", symbol, datetime.datetime.now())
             check_cross(symbol)
-        except Exception as e:
-            print(f"خطأ في {symbol}: {e}")
+        except:
+            pass
 
-    # بدل sleep طويل نخليه نبضات قصيرة
     for i in range(CHECK_INTERVAL):
         time.sleep(1)
         if i % 60 == 0:
