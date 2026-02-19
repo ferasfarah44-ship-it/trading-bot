@@ -2,6 +2,7 @@ import requests
 import pandas as pd
 import time
 import datetime
+import sys
 
 BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
 CHAT_ID = "7960335113"
@@ -14,15 +15,21 @@ sent_signals = {}
 def send_telegram(message):
     try:
         url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        r = requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
-        print("تم إرسال تنبيه")
+        r = requests.post(url, data={
+            "chat_id": CHAT_ID,
+            "text": message
+        }, timeout=15)
+
+        print("رد التليجرام:", r.status_code, r.text)
+
     except Exception as e:
         print("خطأ تلجرام:", e)
 
 def get_usdt_pairs():
     try:
         url = f"{BASE_URL}/api/v3/ticker/price"
-        data = requests.get(url, timeout=10).json()
+        r = requests.get(url, timeout=10)
+        data = r.json()
         return [x["symbol"] for x in data if x["symbol"].endswith("USDT")]
     except Exception as e:
         print("خطأ تحميل الأزواج:", e)
@@ -32,7 +39,8 @@ def get_klines(symbol):
     try:
         url = f"{BASE_URL}/api/v3/klines"
         params = {"symbol": symbol, "interval": INTERVAL, "limit": 150}
-        data = requests.get(url, params=params, timeout=10).json()
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
 
         if not isinstance(data, list):
             return None
@@ -48,7 +56,9 @@ def get_klines(symbol):
         df["volume"] = pd.to_numeric(df["volume"])
 
         return df
-    except:
+
+    except Exception as e:
+        print("خطأ بيانات:", symbol, e)
         return None
 
 def check_cross(symbol):
@@ -98,7 +108,7 @@ def check_cross(symbol):
         return
 
     message = f"""
-🚀 تقاطع صعودي قوي
+🚀 إشارة تقاطع قوية
 
 {symbol}
 
@@ -112,7 +122,9 @@ def check_cross(symbol):
     send_telegram(message)
     sent_signals[symbol] = curr["time"]
 
+# 🔥 رسالة تشغيل إجبارية
 print("تم تشغيل البوت:", datetime.datetime.now())
+send_telegram("✅ تم تشغيل البوت بنجاح")
 
 while True:
 
@@ -121,15 +133,17 @@ while True:
     symbols = get_usdt_pairs()
 
     if not symbols:
+        print("لا يوجد أزواج")
         time.sleep(30)
         continue
 
     for symbol in symbols:
         try:
             check_cross(symbol)
-            time.sleep(0.8)   # مهم جداً لمنع الضغط والانهيار
+            time.sleep(0.8)
         except Exception as e:
             print("خطأ في زوج:", symbol, e)
 
     print("=== نهاية دورة ===", datetime.datetime.now())
+
     time.sleep(300)
