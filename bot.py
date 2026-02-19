@@ -21,13 +21,25 @@ def send_telegram(message):
         pass
 
 def get_all_usdt_pairs():
-    url = "https://api.binance.com/api/v3/exchangeInfo"
-    data = requests.get(url, timeout=10).json()
-    symbols = []
-    for s in data["symbols"]:
-        if s["quoteAsset"] == "USDT" and s["status"] == "TRADING":
-            symbols.append(s["symbol"])
-    return symbols
+    try:
+        url = "https://api.binance.com/api/v3/exchangeInfo"
+        response = requests.get(url, timeout=10)
+        data = response.json()
+
+        if "symbols" not in data:
+            print("رد غير متوقع من Binance:", data)
+            return []
+
+        symbols = []
+        for s in data["symbols"]:
+            if s.get("quoteAsset") == "USDT" and s.get("status") == "TRADING":
+                symbols.append(s["symbol"])
+
+        return symbols
+
+    except Exception as e:
+        print("فشل جلب الأزواج:", e)
+        return []
 
 def get_klines(symbol):
     try:
@@ -51,6 +63,7 @@ def get_klines(symbol):
         df.dropna(inplace=True)
 
         return df
+
     except:
         return None
 
@@ -111,19 +124,29 @@ def check_cross(symbol):
         send_telegram(message)
         sent_signals[symbol] = last_time
 
+
 print("تم تشغيل البوت:", datetime.datetime.now())
 
-SYMBOLS = get_all_usdt_pairs()
-print("عدد الأزواج:", len(SYMBOLS))
+# تحميل الأزواج مع إعادة المحاولة
+while True:
+    SYMBOLS = get_all_usdt_pairs()
+
+    if SYMBOLS:
+        print("عدد الأزواج:", len(SYMBOLS))
+        break
+    else:
+        print("فشل تحميل الأزواج - إعادة المحاولة بعد 10 ثواني")
+        time.sleep(10)
 
 while True:
+
     for symbol in SYMBOLS:
         try:
             check_cross(symbol)
         except Exception as e:
             print("خطأ في", symbol)
 
-    # نبضات لمنع النوم
+    # نبضات منع النوم
     for i in range(CHECK_INTERVAL):
         time.sleep(1)
         if i % 60 == 0:
