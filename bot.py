@@ -8,10 +8,9 @@ CHAT_ID = "7960335113"
 
 INTERVAL = "15m"
 CHECK_INTERVAL = 300
+BASE_URL = "https://data-api.binance.vision"
 
 sent_signals = {}
-
-BASE_URL = "https://data-api.binance.vision"
 
 def send_telegram(message):
     try:
@@ -24,15 +23,14 @@ def get_usdt_pairs():
     try:
         url = f"{BASE_URL}/api/v3/ticker/price"
         data = requests.get(url, timeout=10).json()
-        pairs = [x["symbol"] for x in data if x["symbol"].endswith("USDT")]
-        return pairs
+        return [x["symbol"] for x in data if x["symbol"].endswith("USDT")]
     except:
         return []
 
 def get_klines(symbol):
     try:
         url = f"{BASE_URL}/api/v3/klines"
-        params = {"symbol": symbol, "interval": INTERVAL, "limit": 100}
+        params = {"symbol": symbol, "interval": INTERVAL, "limit": 120}
         data = requests.get(url, params=params, timeout=10).json()
 
         if not isinstance(data, list):
@@ -46,6 +44,7 @@ def get_klines(symbol):
         df["close"] = pd.to_numeric(df["close"])
         df["high"] = pd.to_numeric(df["high"])
         df["low"] = pd.to_numeric(df["low"])
+        df["volume"] = pd.to_numeric(df["volume"])
 
         return df
     except:
@@ -55,11 +54,13 @@ def check_cross(symbol):
     global sent_signals
 
     df = get_klines(symbol)
-    if df is None or len(df) < 30:
+    if df is None or len(df) < 50:
         return
 
     df["MA5"] = df["close"].rolling(5).mean()
     df["MA25"] = df["close"].rolling(25).mean()
+    df["VOL_MA20"] = df["volume"].rolling(20).mean()
+
     df.dropna(inplace=True)
 
     if len(df) < 2:
@@ -68,22 +69,35 @@ def check_cross(symbol):
     prev = df.iloc[-2]
     curr = df.iloc[-1]
 
-    if prev["MA5"] < prev["MA25"] and curr["MA5"] > curr["MA25"]:
+    bullish_cross = (
+        prev["MA5"] < prev["MA25"] and
+        curr["MA5"] > curr["MA25"] and
+        curr["close"] > curr["MA25"] and
+        curr["MA5"] > prev["MA5"] and
+        curr["MA25"] > prev["MA25"] and
+        curr["volume"] > curr["VOL_MA20"]
+    )
 
-        if symbol in sent_signals and sent_signals[symbol] == curr["time"]:
-            return
+    if not bullish_cross:
+        return
 
-        entry = curr["close"]
-        target = df["high"].tail(20).max()
-        stop = df["low"].tail(20).min()
+    if symbol in sent_signals and sent_signals[symbol] == curr["time"]:
+        return
 
-        if entry <= stop:
-            return
+    entry = curr["close"]
+    target = df["high"].tail(20).max()
+    stop = df["low"].tail(20).min()
 
-        rr = round((target - entry) / (entry - stop), 2)
+    if entry <= stop:
+        return
 
-        message = f"""
-🚀 تقاطع MA5 مع MA25
+    rr = round((target - entry) / (entry - stop), 2)
+
+    if rr < 1.5:
+        return
+
+    message = f"""
+🚀 تقاطع قوي MA5 / MA25
 
 {symbol}
 
@@ -92,10 +106,11 @@ def check_cross(symbol):
 🛑 الوقف: {stop}
 ⚖ R/R: {rr}
 
+🔥 فلترة احترافية
 ⏰ {datetime.datetime.now().strftime("%H:%M")}
 """
-        send_telegram(message)
-        sent_signals[symbol] = curr["time"]
+    send_telegram(message)
+    sent_signals[symbol] = curr["time"]
 
 print("تم تشغيل البوت:", datetime.datetime.now())
 
@@ -104,7 +119,7 @@ while True:
     SYMBOLS = get_usdt_pairs()
 
     if not SYMBOLS:
-        print("فشل تحميل الأزواج - إعادة المحاولة")
+        print("فشل تحميل الأزواج")
         time.sleep(10)
         continue
 
