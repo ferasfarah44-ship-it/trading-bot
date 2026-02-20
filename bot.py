@@ -1,139 +1,79 @@
-import requests
-import pandas as pd
+import os
 import time
-import datetime
+import schedule
+import telebot
+import pandas as pd
+import ccxt
 
-BOT_TOKEN = "8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE"
-CHAT_ID = "7960335113"
+# جلب توكن تلجرام ومعرف الشات من إعدادات Railway
+TELE_TOKEN = os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE')
+CHAT_ID = os.getenv('7960335113')
+bot = telebot.TeleBot(TELE_TOKEN)
 
-INTERVAL = "15m"
-CHECK_INTERVAL = 300
-BASE_URL = "https://data-api.binance.vision"
+# تهيئة الاتصال بالسوق (بيانات عامة بدون API Key)
+exchange = ccxt.binance()
 
-sent_signals = {}
-
-def send_telegram(message):
+def get_top_150_pairs():
+    """جلب قائمة بأكثر 150 زوجاً تداولاً مقابل USDT"""
     try:
-        url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-        requests.post(url, data={"chat_id": CHAT_ID, "text": message}, timeout=10)
+        tickers = exchange.fetch_tickers()
+        usdt_pairs = [symbol for symbol in tickers if symbol.endswith('/USDT')]
+        # ترتيب العملات حسب حجم التداول التنازلي واختيار أول 150
+        sorted_pairs = sorted(usdt_pairs, key=lambda x: tickers[x]['quoteVolume'], reverse=True)
+        return sorted_pairs[:150]
+    except Exception as e:
+        print(f"Error fetching pairs: {e}")
+        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+
+def analyze_pair(symbol):
+    """تحليل العملة بناءً على تقاطع الخط الأصفر للأعلى"""
+    try:
+        # جلب البيانات بفريم الساعة (1h)
+        bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
+        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # حساب المتوسطات (الأصفر 7 والآخر 25)
+        df['ma_short'] = df['close'].rolling(window=7).mean()
+        df['ma_long'] = df['close'].rolling(window=25).mean()
+
+        last = df.iloc[-1]
+        prev = df.iloc[-2]
+
+        # شرط التقاطع للأعلى (الخط الأصفر يقطع للأعلى)
+        if prev['ma_short'] < prev['ma_long'] and last['ma_short'] > last['ma_long']:
+            price = last['close']
+            msg = (f"🚀 **إشارة دخول (فريم الساعة): {symbol}**\n\n"
+                   f"💰 السعر الحالي: {price}\n"
+                   f"📥 سعر الدخول: {price}\n\n"
+                   f"🎯 الهدف 1: {round(price * 1.03, 5)}\n"
+                   f"🎯 الهدف 2: {round(price * 1.05, 5)}\n"
+                   f"🎯 الهدف 3: {round(price * 1.10, 5)}\n"
+                   f"🛠 التحليل: الخط الأصفر اخترق للأعلى")
+            bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
     except:
         pass
 
-def get_usdt_pairs():
-    try:
-        url = f"{BASE_URL}/api/v3/ticker/price"
-        data = requests.get(url, timeout=10).json()
-        return [x["symbol"] for x in data if x["symbol"].endswith("USDT")]
-    except:
-        return []
+def run_scanner():
+    """بدء مسح الـ 150 زوجاً"""
+    pairs = get_top_150_pairs()
+    for pair in pairs:
+        analyze_pair(pair)
+        time.sleep(0.1) # لتجنب الضغط على السيرفر
 
-def get_klines(symbol):
-    try:
-        url = f"{BASE_URL}/api/v3/klines"
-        params = {"symbol": symbol, "interval": INTERVAL, "limit": 150}
-        data = requests.get(url, params=params, timeout=10).json()
+def send_status():
+    """رسالة الحالة كل ساعة"""
+    bot.send_message(CHAT_ID, "✅ تحديث: البوت والتحليل (فريم الساعة) يعملان بنجاح على 150 زوجاً.")
 
-        if not isinstance(data, list):
-            return None
+# رسائل البداية والجدولة
+bot.send_message(CHAT_ID, "🤖 تم تشغيل البوت! جاري مسح 150 زوجاً مقابل USDT على فريم الساعة.")
 
-        df = pd.DataFrame(data, columns=[
-            "time","open","high","low","close","volume",
-            "_","_","_","_","_","_"
-        ])
+# جدولة المهام
+schedule.every(20).minutes.do(run_scanner) # إعادة المسح كل 20 دقيقة (مناسب لفريم الساعة)
+schedule.every(1).hours.do(send_status)    # رسالة التأكيد كل ساعة
 
-        df["close"] = pd.to_numeric(df["close"])
-        df["high"] = pd.to_numeric(df["high"])
-        df["low"] = pd.to_numeric(df["low"])
-        df["volume"] = pd.to_numeric(df["volume"])
-
-        return df
-    except:
-        return None
-
-def check_cross(symbol):
-    global sent_signals
-
-    df = get_klines(symbol)
-    if df is None or len(df) < 60:
-        return
-
-    df["MA5"] = df["close"].rolling(5).mean()
-    df["MA25"] = df["close"].rolling(25).mean()
-    df["VOL_MA20"] = df["volume"].rolling(20).mean()
-
-    df.dropna(inplace=True)
-
-    if len(df) < 5:
-        return
-
-    prev = df.iloc[-2]
-    curr = df.iloc[-1]
-    m3 = df.iloc[-3]
-    m4 = df.iloc[-4]
-
-    bullish_cross = (
-        prev["MA5"] < prev["MA25"] and
-        curr["MA5"] > curr["MA25"] and
-        curr["close"] > curr["MA25"] and
-        curr["MA5"] > prev["MA5"] > m3["MA5"] and
-        curr["MA25"] > prev["MA25"] > m3["MA25"] > m4["MA25"] and
-        curr["volume"] > curr["VOL_MA20"]
-    )
-
-    if not bullish_cross:
-        return
-
-    if symbol in sent_signals and sent_signals[symbol] == curr["time"]:
-        return
-
-    entry = curr["close"]
-    target = df["high"].tail(20).max()
-    stop = df["low"].tail(20).min()
-
-    if entry <= stop:
-        return
-
-    rr = round((target - entry) / (entry - stop), 2)
-
-    if rr < 1.5:
-        return
-
-    message = f"""
-🚀 تقاطع صعودي قوي MA5 / MA25
-
-{symbol}
-
-📍 دخول: {entry}
-🎯 الهدف: {target}
-🛑 الوقف: {stop}
-⚖ R/R: {rr}
-
-🔥 فلترة احترافية عالية
-⏰ {datetime.datetime.now().strftime("%H:%M")}
-"""
-    send_telegram(message)
-    sent_signals[symbol] = curr["time"]
-
-print("تم تشغيل البوت:", datetime.datetime.now())
-
-while True:
-
-    SYMBOLS = get_usdt_pairs()
-
-    if not SYMBOLS:
-        print("فشل تحميل الأزواج")
-        time.sleep(10)
-        continue
-
-    print("عدد الأزواج:", len(SYMBOLS))
-
-    for symbol in SYMBOLS:
-        try:
-            check_cross(symbol)
-        except:
-            pass
-
-    for i in range(CHECK_INTERVAL):
+if __name__ == "__main__":
+    # تشغيل المسح الأول فوراً عند التشغيل
+    run_scanner()
+    while True:
+        schedule.run_pending()
         time.sleep(1)
-        if i % 60 == 0:
-            print("يعمل...", datetime.datetime.now())
