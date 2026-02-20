@@ -2,3 +2,7 @@ pandas
 numpy
 requests
 python-binance
+pyTelegramBotAPI
+pandas
+ccxt
+schedule
