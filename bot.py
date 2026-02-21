@@ -1,79 +1,384 @@
-import os
-import time
-import schedule
-import telebot
-import pandas as pd
 import ccxt
+import pandas as pd
+import numpy as np
+import time
+import requests
+from datetime import datetime, timedelta
+import logging
+from typing import Dict, List, Optional
+import schedule
+import os
+from dotenv import load_dotenv
 
-# جلب توكن تلجرام ومعرف الشات من إعدادات Railway
-TELE_TOKEN = os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE')
-CHAT_ID = os.getenv('7960335113')
-bot = telebot.TeleBot(TELE_TOKEN)
+# Load environment variables
+load_dotenv()
 
-# تهيئة الاتصال بالسوق (بيانات عامة بدون API Key)
-exchange = ccxt.binance()
+# Configuration - NO Binance API Keys Needed!
+CONFIG = {
+    'telegram_bot_token': os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE),
+    'telegram_chat_id': os.getenv('7960335113'),
+    'ma_periods': {
+        'fast': 7,
+        'medium': 25,
+        'slow': 99,
+        'long': 200
+    },
+    'targets': {
+        'tp1_percent': 3,
+        'tp2_percent': 6,
+        'tp3_percent': 10,
+        'stop_loss': 2
+    },
+    'min_volume_24h': 1000000,
+    'scan_interval_minutes': 5
+}
 
-def get_top_150_pairs():
-    """جلب قائمة بأكثر 150 زوجاً تداولاً مقابل USDT"""
-    try:
-        tickers = exchange.fetch_tickers()
-        usdt_pairs = [symbol for symbol in tickers if symbol.endswith('/USDT')]
-        # ترتيب العملات حسب حجم التداول التنازلي واختيار أول 150
-        sorted_pairs = sorted(usdt_pairs, key=lambda x: tickers[x]['quoteVolume'], reverse=True)
-        return sorted_pairs[:150]
-    except Exception as e:
-        print(f"Error fetching pairs: {e}")
-        return ["BTC/USDT", "ETH/USDT", "SOL/USDT", "BNB/USDT"]
+# Setup logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('trading_bot.log'),
+        logging.StreamHandler()
+    ]
+)
 
-def analyze_pair(symbol):
-    """تحليل العملة بناءً على تقاطع الخط الأصفر للأعلى"""
-    try:
-        # جلب البيانات بفريم الساعة (1h)
-        bars = exchange.fetch_ohlcv(symbol, timeframe='1h', limit=50)
-        df = pd.DataFrame(bars, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+class TelegramNotifier:
+    """Send notifications via Telegram"""
+    def __init__(self, bot_token: str, chat_id: str):
+        self.bot_token = bot_token
+        self.chat_id = chat_id
+        self.base_url = f"https://api.telegram.org/bot{bot_token}"
+    
+    def send_message(self, message: str, parse_mode: str = "HTML"):
+        """Send message to Telegram"""
+        try:
+            url = f"{self.base_url}/sendMessage"
+            data = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': parse_mode,
+                'disable_web_page_preview': True
+            }
+            response = requests.post(url, json=data, timeout=10)
+            response.raise_for_status()
+            logging.info("✅ Telegram message sent successfully")
+        except Exception as e:
+            logging.error(f"❌ Failed to send Telegram message: {e}")
+
+class BinanceScanner:
+    """Scan Binance for USDT pairs and analyze MA crossovers"""
+    def __init__(self, config: Dict):
+        self.config = config
+        # NO API KEYS NEEDED - Public data only!
+        self.exchange = ccxt.binance({
+            'enableRateLimit': True,
+            'options': {'defaultType': 'spot'}
+        })
+        self.telegram = TelegramNotifier(
+            config['telegram_bot_token'],
+            config['telegram_chat_id']
+        )
+        self.analyzed_pairs = set()
+        self.start_time = None
+        self.signals_count = 0
+    
+    def get_usdt_pairs(self) -> List[str]:
+        """Get all USDT trading pairs from Binance"""
+        try:
+            markets = self.exchange.load_markets()
+            usdt_pairs = [
+                symbol for symbol in markets.keys() 
+                if symbol.endswith('/USDT') and not symbol.startswith('1000')
+            ]
+            usdt_pairs.sort()
+            logging.info(f"📊 Found {len(usdt_pairs)} USDT pairs")
+            return usdt_pairs[:200]
+        except Exception as e:
+            logging.error(f"❌ Error fetching USDT pairs: {e}")
+            return []
+    
+    def get_ohlcv_data(self, symbol: str, timeframe: str = '1h', limit: int = 300) -> Optional[pd.DataFrame]:
+        """Fetch OHLCV data for a symbol"""
+        try:
+            ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+            df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df
+        except Exception as e:
+            logging.error(f"❌ Error fetching data for {symbol}: {e}")
+            return None
+    
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calculate Moving Averages and other indicators"""
+        df['MA7'] = df['close'].rolling(window=self.config['ma_periods']['fast']).mean()
+        df['MA25'] = df['close'].rolling(window=self.config['ma_periods']['medium']).mean()
+        df['MA99'] = df['close'].rolling(window=self.config['ma_periods']['slow']).mean()
+        df['MA200'] = df['close'].rolling(window=self.config['ma_periods']['long']).mean()
         
-        # حساب المتوسطات (الأصفر 7 والآخر 25)
-        df['ma_short'] = df['close'].rolling(window=7).mean()
-        df['ma_long'] = df['close'].rolling(window=25).mean()
+        delta = df['close'].diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+        rs = gain / loss
+        df['RSI'] = 100 - (100 / (1 + rs))
+        
+        df['volume_MA'] = df['volume'].rolling(window=20).mean()
+        
+        return df
+    
+    def check_buy_signal(self, df: pd.DataFrame) -> Dict:
+        """Check for buy signal based on MA7 (yellow line) crossover"""
+        if len(df) < 200:
+            return {'signal': False}
+        
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        ma7_crossed_up = (previous['MA7'] <= previous['MA25'] and 
+                          current['MA7'] > current['MA25'])
+        
+        price_above_ma7 = current['close'] > current['MA7']
+        ma7_trending_up = current['MA7'] > previous['MA7']
+        volume_spike = current['volume'] > (current['volume_MA'] * 1.5)
+        rsi_ok = 30 < current['RSI'] < 70
+        
+        price_change_24h = ((current['close'] - df.iloc[-24]['close']) / df.iloc[-24]['close']) * 100 if len(df) >= 24 else 0
+        
+        signal = (ma7_crossed_up or (price_above_ma7 and ma7_trending_up)) and volume_spike and rsi_ok
+        
+        return {
+            'signal': signal,
+            'ma7_crossed_up': ma7_crossed_up,
+            'price_above_ma7': price_above_ma7,
+            'ma7_trending_up': ma7_trending_up,
+            'volume_spike': volume_spike,
+            'rsi': current['RSI'],
+            'price_change_24h': price_change_24h,
+            'current_price': current['close'],
+            'ma7': current['MA7'],
+            'ma25': current['MA25'],
+            'ma99': current['MA99'],
+            'ma200': current['MA200'],
+            'volume': current['volume']
+        }
+    
+    def calculate_targets(self, entry_price: float) -> Dict:
+        """Calculate take profit targets and stop loss"""
+        tp1 = entry_price * (1 + self.config['targets']['tp1_percent'] / 100)
+        tp2 = entry_price * (1 + self.config['targets']['tp2_percent'] / 100)
+        tp3 = entry_price * (1 + self.config['targets']['tp3_percent'] / 100)
+        sl = entry_price * (1 - self.config['targets']['stop_loss'] / 100)
+        
+        return {
+            'entry': entry_price,
+            'tp1': tp1,
+            'tp1_percent': f"+{self.config['targets']['tp1_percent']}%",
+            'tp2': tp2,
+            'tp2_percent': f"+{self.config['targets']['tp2_percent']}%",
+            'tp3': tp3,
+            'tp3_percent': f"+{self.config['targets']['tp3_percent']}%",
+            'stop_loss': sl,
+            'stop_loss_percent': f"-{self.config['targets']['stop_loss']}%"
+        }
+    
+    def format_signal_message(self, symbol: str, signal_data: Dict, targets: Dict) -> str:
+        """Format the signal message for Telegram"""
+        message = f"""
+🚀 <b>NEW TRADING SIGNAL DETECTED!</b> 🚀
 
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
+<b>Pair:</b> {symbol}
+💰 <b>Current Price:</b> ${signal_data['current_price']:.6f}
 
-        # شرط التقاطع للأعلى (الخط الأصفر يقطع للأعلى)
-        if prev['ma_short'] < prev['ma_long'] and last['ma_short'] > last['ma_long']:
-            price = last['close']
-            msg = (f"🚀 **إشارة دخول (فريم الساعة): {symbol}**\n\n"
-                   f"💰 السعر الحالي: {price}\n"
-                   f"📥 سعر الدخول: {price}\n\n"
-                   f"🎯 الهدف 1: {round(price * 1.03, 5)}\n"
-                   f"🎯 الهدف 2: {round(price * 1.05, 5)}\n"
-                   f"🎯 الهدف 3: {round(price * 1.10, 5)}\n"
-                   f"🛠 التحليل: الخط الأصفر اخترق للأعلى")
-            bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
-    except:
-        pass
+📈 <b>Technical Analysis:</b>
+├ MA7 (Yellow): ${signal_data['ma7']:.6f}
+├ MA25: ${signal_data['ma25']:.6f}
+├ MA99: ${signal_data['ma99']:.6f}
+├ MA200: ${signal_data['ma200']:.6f}
+├ RSI: {signal_data['rsi']:.2f}
+└ 24h Change: {signal_data['price_change_24h']:+.2f}%
 
-def run_scanner():
-    """بدء مسح الـ 150 زوجاً"""
-    pairs = get_top_150_pairs()
-    for pair in pairs:
-        analyze_pair(pair)
-        time.sleep(0.1) # لتجنب الضغط على السيرفر
+🎯 <b>Entry & Targets:</b>
+├ 🟢 Entry: ${targets['entry']:.6f}
+├ 🎯 TP1: ${targets['tp1']:.6f} ({targets['tp1_percent']})
+├ 🎯 TP2: ${targets['tp2']:.6f} ({targets['tp2_percent']})
+├ 🎯 TP3: ${targets['tp3']:.6f} ({targets['tp3_percent']})
+└ 🔴 Stop Loss: ${targets['stop_loss']:.6f} ({targets['stop_loss_percent']})
 
-def send_status():
-    """رسالة الحالة كل ساعة"""
-    bot.send_message(CHAT_ID, "✅ تحديث: البوت والتحليل (فريم الساعة) يعملان بنجاح على 150 زوجاً.")
+📊 <b>Signal Conditions:</b>
+{'✅' if signal_data['ma7_crossed_up'] else '❌'} MA7 Crossed Up
+{'✅' if signal_data['price_above_ma7'] else '❌'} Price Above MA7
+{'✅' if signal_data['ma7_trending_up'] else '❌'} MA7 Trending Up
+{'✅' if signal_data['volume_spike'] else '❌'} Volume Spike
+{'✅' if 30 < signal_data['rsi'] < 70 else '❌'} RSI OK
 
-# رسائل البداية والجدولة
-bot.send_message(CHAT_ID, "🤖 تم تشغيل البوت! جاري مسح 150 زوجاً مقابل USDT على فريم الساعة.")
+⏰ <b>Time:</b> {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        return message
+    
+    def analyze_pair(self, symbol: str) -> Optional[Dict]:
+        """Analyze a single trading pair"""
+        try:
+            df = self.get_ohlcv_data(symbol, timeframe='1h', limit=300)
+            if df is None or len(df) < 200:
+                return None
+            
+            df = self.calculate_indicators(df)
+            signal_data = self.check_buy_signal(df)
+            
+            if signal_data['signal']:
+                targets = self.calculate_targets(signal_data['current_price'])
+                return {
+                    'symbol': symbol,
+                    'signal_data': signal_data,
+                    'targets': targets
+                }
+            
+            return None
+        except Exception as e:
+            logging.error(f"❌ Error analyzing {symbol}: {e}")
+            return None
+    
+    def send_startup_message(self):
+        """Send confirmation message when bot starts"""
+        message = f"""
+🤖 <b>TRADING BOT STARTED</b> 🤖
 
-# جدولة المهام
-schedule.every(20).minutes.do(run_scanner) # إعادة المسح كل 20 دقيقة (مناسب لفريم الساعة)
-schedule.every(1).hours.do(send_status)    # رسالة التأكيد كل ساعة
+✅ Bot is now running and scanning the market
+📊 Monitoring: 200 USDT pairs
+📈 Strategy: MA7 (Yellow Line) Crossover
+⏱️ Analysis: Continuous (every {CONFIG['scan_interval_minutes']} minutes)
+📢 Status updates: Every hour
+
+<b>Configuration:</b>
+├ MA Periods: 7, 25, 99, 200
+├ Take Profit Levels: 3%, 6%, 10%
+└ Stop Loss: 2%
+
+⏰ Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+
+<i>The bot will send alerts when buy conditions are met!</i>
+"""
+        self.telegram.send_message(message)
+        logging.info("✅ Startup message sent")
+    
+    def send_hourly_status(self):
+        """Send hourly status update"""
+        uptime = datetime.now() - self.start_time if self.start_time else timedelta(0)
+        message = f"""
+⏰ <b>HOURLY STATUS UPDATE</b> ⏰
+
+✅ Bot is running normally
+🕐 Current Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏳ Uptime: {str(uptime).split('.')[0]}
+📊 Pairs Analyzed: {len(self.analyzed_pairs)}
+🔍 Active Monitoring: 200 USDT pairs
+📈 Total Signals Found: {self.signals_count}
+
+<i>Bot is scanning for MA7 crossover signals...</i>
+"""
+        self.telegram.send_message(message)
+        logging.info("✅ Hourly status message sent")
+    
+    def run_scan(self):
+        """Run a complete scan of all USDT pairs"""
+        pairs = self.get_usdt_pairs()
+        if not pairs:
+            logging.warning("⚠️ No pairs to scan")
+            return 0
+        
+        logging.info(f"🔍 Starting scan of {len(pairs)} pairs...")
+        signals_found = 0
+        
+        for i, symbol in enumerate(pairs, 1):
+            try:
+                time.sleep(0.1)
+                result = self.analyze_pair(symbol)
+                
+                if result:
+                    message = self.format_signal_message(
+                        result['symbol'],
+                        result['signal_data'],
+                        result['targets']
+                    )
+                    self.telegram.send_message(message)
+                    signals_found += 1
+                    self.signals_count += 1
+                    logging.info(f"🚀 Signal found for {symbol}")
+                
+                self.analyzed_pairs.add(symbol)
+                
+                if i % 50 == 0:
+                    logging.info(f"📊 Progress: {i}/{len(pairs)} pairs analyzed")
+                    
+            except Exception as e:
+                logging.error(f"❌ Error processing {symbol}: {e}")
+                continue
+        
+        logging.info(f"✅ Scan completed. Found {signals_found} signals.")
+        return signals_found
+    
+    def run(self):
+        """Main bot loop"""
+        logging.info("🚀 Starting Trading Bot...")
+        self.start_time = datetime.now()
+        
+        self.send_startup_message()
+        
+        schedule.every().hour.do(self.send_hourly_status)
+        
+        logging.info("🔍 Running initial scan...")
+        self.run_scan()
+        
+        schedule.every(CONFIG['scan_interval_minutes']).minutes.do(self.run_scan)
+        
+        logging.info(f"⏰ Bot is now running continuously (scanning every {CONFIG['scan_interval_minutes']} minutes)...")
+        
+        while True:
+            try:
+                schedule.run_pending()
+                time.sleep(1)
+            except KeyboardInterrupt:
+                logging.info("🛑 Bot stopped by user")
+                break
+            except Exception as e:
+                logging.error(f"❌ Error in main loop: {e}")
+                time.sleep(5)
+
+def validate_config():
+    """Validate configuration"""
+    required_vars = [
+        'TELEGRAM_BOT_TOKEN',
+        'TELEGRAM_CHAT_ID'
+    ]
+    
+    missing = [var for var in required_vars if not os.getenv(var)]
+    
+    if missing:
+        print("❌ Missing environment variables:")
+        for var in missing:
+            print(f"   - {var}")
+        print("\n📝 Please create a .env file with your credentials.")
+        print("📄 Check .env.example for reference.")
+        return False
+    
+    return True
+
+def main():
+    """Main function to run the bot"""
+    print("=" * 60)
+    print("🤖 CRYPTO TRADING BOT - MA7 STRATEGY")
+    print("=" * 60)
+    print("🔓 NO API KEYS REQUIRED - Public Data Only!")
+    print("=" * 60)
+    
+    if not validate_config():
+        return
+    
+    print("✅ Configuration validated successfully")
+    print("📊 Initializing bot...")
+    
+    bot = BinanceScanner(CONFIG)
+    bot.run()
 
 if __name__ == "__main__":
-    # تشغيل المسح الأول فوراً عند التشغيل
-    run_scanner()
-    while True:
-        schedule.run_pending()
-        time.sleep(1)
+    main()
