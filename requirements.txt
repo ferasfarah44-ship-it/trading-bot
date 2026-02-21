@@ -7,3 +7,7 @@ pandas
 ccxt
 schedule
 python-dotenv
+pyTelegramBotAPI
+pandas
+ccxt
+schedule
