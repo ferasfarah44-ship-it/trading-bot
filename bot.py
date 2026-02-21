@@ -9,14 +9,15 @@ from typing import Dict, List, Optional
 import schedule
 import os
 from dotenv import load_dotenv
+import sys
 
 # Load environment variables
 load_dotenv()
 
 # Configuration - NO Binance API Keys Needed!
 CONFIG = {
-    '8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE': os.getenv('TELEGRAM_BOT_TOKEN'),
-    '7960335113': os.getenv('TELEGRAM_CHAT_ID'),
+    'telegram_bot_token': os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE'),
+    'telegram_chat_id': os.getenv('7960335113'),
     'ma_periods': {
         'fast': 7,
         'medium': 25,
@@ -39,7 +40,7 @@ logging.basicConfig(
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('trading_bot.log'),
-        logging.StreamHandler()
+        logging.StreamHandler(sys.stdout)
     ]
 )
 
@@ -63,8 +64,15 @@ class TelegramNotifier:
             response = requests.post(url, json=data, timeout=10)
             response.raise_for_status()
             logging.info("✅ Telegram message sent successfully")
+            return True
         except Exception as e:
             logging.error(f"❌ Failed to send Telegram message: {e}")
+            return False
+    
+    def test_connection(self) -> bool:
+        """Test Telegram connection"""
+        message = "🔊 <b>BOT CONNECTION TEST</b>\n\n✅ Bot is connected and working!\n🕐 " + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        return self.send_message(message)
 
 class BinanceScanner:
     """Scan Binance for USDT pairs and analyze MA crossovers"""
@@ -86,13 +94,14 @@ class BinanceScanner:
     def get_usdt_pairs(self) -> List[str]:
         """Get all USDT trading pairs from Binance"""
         try:
+            logging.info("📊 Fetching USDT pairs from Binance...")
             markets = self.exchange.load_markets()
             usdt_pairs = [
                 symbol for symbol in markets.keys() 
                 if symbol.endswith('/USDT') and not symbol.startswith('1000')
             ]
             usdt_pairs.sort()
-            logging.info(f"📊 Found {len(usdt_pairs)} USDT pairs")
+            logging.info(f"✅ Found {len(usdt_pairs)} USDT pairs")
             return usdt_pairs[:200]
         except Exception as e:
             logging.error(f"❌ Error fetching USDT pairs: {e}")
@@ -116,12 +125,14 @@ class BinanceScanner:
         df['MA99'] = df['close'].rolling(window=self.config['ma_periods']['slow']).mean()
         df['MA200'] = df['close'].rolling(window=self.config['ma_periods']['long']).mean()
         
+        # Calculate RSI
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         rs = gain / loss
         df['RSI'] = 100 - (100 / (1 + rs))
         
+        # Calculate volume MA
         df['volume_MA'] = df['volume'].rolling(window=20).mean()
         
         return df
@@ -134,16 +145,26 @@ class BinanceScanner:
         current = df.iloc[-1]
         previous = df.iloc[-2]
         
+        # Check if MA7 crossed above MA25
         ma7_crossed_up = (previous['MA7'] <= previous['MA25'] and 
                           current['MA7'] > current['MA25'])
         
+        # Check if price is above MA7
         price_above_ma7 = current['close'] > current['MA7']
+        
+        # Check if MA7 is trending up
         ma7_trending_up = current['MA7'] > previous['MA7']
+        
+        # Check volume spike
         volume_spike = current['volume'] > (current['volume_MA'] * 1.5)
+        
+        # Check RSI (not overbought)
         rsi_ok = 30 < current['RSI'] < 70
         
+        # Calculate price change in last 24h
         price_change_24h = ((current['close'] - df.iloc[-24]['close']) / df.iloc[-24]['close']) * 100 if len(df) >= 24 else 0
         
+        # Generate signal
         signal = (ma7_crossed_up or (price_above_ma7 and ma7_trending_up)) and volume_spike and rsi_ok
         
         return {
@@ -198,7 +219,7 @@ class BinanceScanner:
 └ 24h Change: {signal_data['price_change_24h']:+.2f}%
 
 🎯 <b>Entry & Targets:</b>
-├ 🟢 Entry: ${targets['entry']:.6f}
+├  Entry: ${targets['entry']:.6f}
 ├ 🎯 TP1: ${targets['tp1']:.6f} ({targets['tp1_percent']})
 ├ 🎯 TP2: ${targets['tp2']:.6f} ({targets['tp2_percent']})
 ├ 🎯 TP3: ${targets['tp3']:.6f} ({targets['tp3_percent']})
@@ -258,8 +279,12 @@ class BinanceScanner:
 
 <i>The bot will send alerts when buy conditions are met!</i>
 """
-        self.telegram.send_message(message)
-        logging.info("✅ Startup message sent")
+        success = self.telegram.send_message(message)
+        if success:
+            logging.info("✅ Startup message sent to Telegram")
+        else:
+            logging.error("❌ Failed to send startup message")
+        return success
     
     def send_hourly_status(self):
         """Send hourly status update"""
@@ -276,8 +301,12 @@ class BinanceScanner:
 
 <i>Bot is scanning for MA7 crossover signals...</i>
 """
-        self.telegram.send_message(message)
-        logging.info("✅ Hourly status message sent")
+        success = self.telegram.send_message(message)
+        if success:
+            logging.info("✅ Hourly status sent to Telegram")
+        else:
+            logging.error("❌ Failed to send hourly status")
+        return success
     
     def run_scan(self):
         """Run a complete scan of all USDT pairs"""
@@ -291,7 +320,7 @@ class BinanceScanner:
         
         for i, symbol in enumerate(pairs, 1):
             try:
-                time.sleep(0.1)
+                time.sleep(0.1)  # Rate limit
                 result = self.analyze_pair(symbol)
                 
                 if result:
@@ -300,10 +329,13 @@ class BinanceScanner:
                         result['signal_data'],
                         result['targets']
                     )
-                    self.telegram.send_message(message)
-                    signals_found += 1
-                    self.signals_count += 1
-                    logging.info(f"🚀 Signal found for {symbol}")
+                    success = self.telegram.send_message(message)
+                    if success:
+                        signals_found += 1
+                        self.signals_count += 1
+                        logging.info(f"🚀 Signal found and sent for {symbol}")
+                    else:
+                        logging.error(f"❌ Failed to send signal for {symbol}")
                 
                 self.analyzed_pairs.add(symbol)
                 
@@ -322,17 +354,33 @@ class BinanceScanner:
         logging.info("🚀 Starting Trading Bot...")
         self.start_time = datetime.now()
         
-        self.send_startup_message()
+        # Test Telegram connection first
+        logging.info("📱 Testing Telegram connection...")
+        if not self.telegram.test_connection():
+            logging.error("❌ Telegram connection test failed!")
+            logging.error("📝 Please check your TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID")
+            return
         
+        logging.info("✅ Telegram connection successful!")
+        
+        # Send startup message
+        if not self.send_startup_message():
+            logging.error("❌ Failed to send startup message")
+            return
+        
+        # Schedule hourly status updates
         schedule.every().hour.do(self.send_hourly_status)
         
+        # Initial scan
         logging.info("🔍 Running initial scan...")
         self.run_scan()
         
+        # Schedule regular scans
         schedule.every(CONFIG['scan_interval_minutes']).minutes.do(self.run_scan)
         
         logging.info(f"⏰ Bot is now running continuously (scanning every {CONFIG['scan_interval_minutes']} minutes)...")
         
+        # Main loop
         while True:
             try:
                 schedule.run_pending()
@@ -346,39 +394,62 @@ class BinanceScanner:
 
 def validate_config():
     """Validate configuration"""
-    required_vars = [
-        'TELEGRAM_BOT_TOKEN',
-        'TELEGRAM_CHAT_ID'
-    ]
+    print("=" * 60)
+    print("🔍 Checking environment variables...")
+    print("=" * 60)
     
-    missing = [var for var in required_vars if not os.getenv(var)]
+    telegram_token = os.getenv('TELEGRAM_BOT_TOKEN')
+    telegram_chat_id = os.getenv('TELEGRAM_CHAT_ID')
     
-    if missing:
-        print("❌ Missing environment variables:")
-        for var in missing:
-            print(f"   - {var}")
-        print("\n📝 Please create a .env file with your credentials.")
-        print("📄 Check .env.example for reference.")
+    print(f"\n📱 TELEGRAM_BOT_TOKEN: {'✅ Found' if telegram_token else '❌ Missing'}")
+    print(f"👤 TELEGRAM_CHAT_ID: {'✅ Found' if telegram_chat_id else '❌ Missing'}\n")
+    
+    if not telegram_token:
+        print("❌ ERROR: TELEGRAM_BOT_TOKEN is missing!")
+        print("\n📝 How to fix:")
+        print("   1. Go to Railway Dashboard")
+        print("   2. Click on your service")
+        print("   3. Go to 'Variables' tab")
+        print("   4. Add variable: TELEGRAM_BOT_TOKEN")
+        print("   5. Value: your_bot_token_from_botfather\n")
         return False
     
+    if not telegram_chat_id:
+        print("❌ ERROR: TELEGRAM_CHAT_ID is missing!")
+        print("\n📝 How to fix:")
+        print("   1. Go to Railway Dashboard")
+        print("   2. Click on your service")
+        print("   3. Go to 'Variables' tab")
+        print("   4. Add variable: TELEGRAM_CHAT_ID")
+        print("   5. Value: your_chat_id (numbers)\n")
+        return False
+    
+    print("✅ All environment variables found!")
+    print("=" * 60)
     return True
 
 def main():
     """Main function to run the bot"""
-    print("=" * 60)
+    print("\n" + "=" * 60)
     print("🤖 CRYPTO TRADING BOT - MA7 STRATEGY")
     print("=" * 60)
     print("🔓 NO API KEYS REQUIRED - Public Data Only!")
-    print("=" * 60)
+    print("=" * 60 + "\n")
     
     if not validate_config():
-        return
+        print("\n❌ Configuration validation failed!")
+        print("📝 Please add missing environment variables and redeploy.\n")
+        sys.exit(1)
     
     print("✅ Configuration validated successfully")
-    print("📊 Initializing bot...")
+    print("📊 Initializing bot...\n")
     
-    bot = BinanceScanner(CONFIG)
-    bot.run()
+    try:
+        bot = BinanceScanner(CONFIG)
+        bot.run()
+    except Exception as e:
+        logging.error(f"❌ Fatal error: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
