@@ -15,8 +15,8 @@ load_dotenv()
 
 # Configuration - NO Binance API Keys Needed!
 CONFIG = {
-    'telegram_bot_token': os.getenv('8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE),
-    'telegram_chat_id': os.getenv('7960335113'),
+    '8452767198:AAFeyAUHaI6X09Jns6Q8Lnpp3edOOIMLLsE': os.getenv('TELEGRAM_BOT_TOKEN'),
+    '7960335113': os.getenv('TELEGRAM_CHAT_ID'),
     'ma_periods': {
         'fast': 7,
         'medium': 25,
