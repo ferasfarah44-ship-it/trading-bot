@@ -13,9 +13,9 @@ import sys
 from dotenv import load_dotenv
 load_dotenv()
 
-# Setup logging
+# Setup logging - MORE DETAILED
 logging.basicConfig(
-    level=logging.INFO,
+    level=logging.DEBUG,  # Changed to DEBUG for more details
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
         logging.FileHandler('trading_bot.log'),
@@ -38,7 +38,7 @@ def validate_config():
     print("✅ Configuration valid!")
     return True
 
-# Configuration
+# Configuration - MORE FLEXIBLE
 CONFIG = {
     'telegram_bot_token': os.getenv('TELEGRAM_BOT_TOKEN'),
     'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID'),
@@ -46,9 +46,11 @@ CONFIG = {
     'ma_medium': 25,
     'ma_slow': 99,
     'ma_long': 200,
-    'min_volume_ratio': 1.0,  # خفضت من 1.3 إلى 1.0
-    'max_rsi': 85,  # زدت من 75 إلى 85
-    'min_rsi': 30,
+    'min_volume_ratio': 0.8,  # خفضت أكثر - من 1.0 إلى 0.8
+    'max_rsi': 90,  # وسعت أكثر - من 85 إلى 90
+    'min_rsi': 25,  # وسعت من 30 إلى 25
+    'min_price_change_24h': 5,  # خفضت من 10 إلى 5
+    'max_ma_distance': 20,  # زدت من 15 إلى 20
     'scan_interval_minutes': 5
 }
 
@@ -69,14 +71,13 @@ class TelegramNotifier:
             }
             response = requests.post(url, json=data, timeout=10)
             response.raise_for_status()
-            logging.info("✅ Telegram message sent")
             return True
         except Exception as e:
             logging.error(f"❌ Telegram error: {e}")
             return False
     
     def test_connection(self):
-        msg = "🔊 <b>ADVANCED MA7/MA25 BOT</b>\n\n✅ Connected!"
+        msg = "🔊 <b>BOT STARTED</b>\n\n✅ Advanced Detection Enabled!"
         return self.send_message(msg)
 
 class BinanceScanner:
@@ -87,6 +88,7 @@ class BinanceScanner:
         self.start_time = None
         self.signals_count = 0
         self.analyzed_pairs = set()
+        self.debug_count = 0
     
     def get_usdt_pairs(self):
         try:
@@ -108,7 +110,6 @@ class BinanceScanner:
             return None
     
     def calculate_indicators(self, df):
-        # MAs
         df['MA7'] = df['close'].rolling(window=self.config['ma_fast']).mean()
         df['MA25'] = df['close'].rolling(window=self.config['ma_medium']).mean()
         df['MA99'] = df['close'].rolling(window=self.config['ma_slow']).mean()
@@ -140,208 +141,160 @@ class BinanceScanner:
         
         # Momentum
         df['momentum'] = df['close'].pct_change(14) * 100
-        
-        # MA slopes
         df['MA7_slope'] = df['MA7'].pct_change(3) * 100
-        df['MA25_slope'] = df['MA25'].pct_change(3) * 100
         
         return df
     
-    def check_all_signals(self, df):
+    def check_signals_with_debug(self, symbol, df):
         """
-        Check MULTIPLE signal types:
-        1. Fresh crossover
-        2. Already trending
-        3. Strong momentum breakout
-        4. Volume spike
+        Check signals WITH DETAILED DEBUGGING
+        Shows WHY a pair passes or fails
         """
         if len(df) < 30:
-            return {'signal': False}
+            return {'signal': False, 'reason': 'Not enough data'}
         
         current = df.iloc[-1]
         previous = df.iloc[-2]
         
-        # === SIGNAL TYPE 1: Fresh MA7/MA25 Crossover ===
-        fresh_cross = (previous['MA7'] <= previous['MA25'] and 
-                      current['MA7'] > current['MA25'])
+        # Calculate all conditions
+        conditions = {}
         
-        # === SIGNAL TYPE 2: Already Trending (MA7 above MA25) ===
-        ma7_above_ma25 = current['MA7'] > current['MA25']
-        ma7_trending = current['MA7'] > previous['MA7']
-        ma25_trending = current['MA25'] > previous['MA25']
-        price_above_mas = current['close'] > max(current['MA7'], current['MA25'])
+        # Basic MA conditions
+        conditions['ma7_above_ma25'] = current['MA7'] > current['MA25']
+        conditions['fresh_cross'] = (previous['MA7'] <= previous['MA25'] and 
+                                    current['MA7'] > current['MA25'])
+        conditions['ma7_trending'] = current['MA7'] > previous['MA7']
+        conditions['ma25_trending'] = current['MA25'] > previous['MA25']
+        conditions['price_above_mas'] = current['close'] > max(current['MA7'], current['MA25'])
+        conditions['above_ma200'] = current['close'] > current['MA200']
         
-        # Distance between MAs
+        # MA distance
         ma_distance = ((current['MA7'] - current['MA25']) / current['MA25']) * 100
+        conditions['ma_distance_ok'] = abs(ma_distance) < self.config['max_ma_distance']
+        conditions['ma_distance'] = ma_distance
         
-        # === SIGNAL TYPE 3: Strong Momentum ===
-        strong_momentum = (current['change_24h'] > 10 and  # +10% in 24h
-                          current['momentum'] > 5 and
-                          current['MA7_slope'] > 0)
-        
-        # === SIGNAL TYPE 4: Volume Spike ===
+        # Volume
         volume_ratio = current['volume'] / current['volume_MA'] if current['volume_MA'] > 0 else 0
-        volume_spike = volume_ratio > self.config['min_volume_ratio']
+        conditions['volume_ratio'] = volume_ratio
+        conditions['volume_ok'] = volume_ratio > self.config['min_volume_ratio']
         
-        # === RSI Check (More Flexible) ===
-        rsi_ok = self.config['min_rsi'] < current['RSI'] < self.config['max_rsi']
+        # RSI
+        conditions['rsi'] = current['RSI']
+        conditions['rsi_ok'] = self.config['min_rsi'] < current['RSI'] < self.config['max_rsi']
         
-        # === Price above MA200 (Long term trend) ===
-        above_ma200 = current['close'] > current['MA200']
+        # Price changes
+        conditions['change_24h'] = current['change_24h'] if not pd.isna(current['change_24h']) else 0
+        conditions['momentum_ok'] = conditions['change_24h'] > self.config['min_price_change_24h']
+        conditions['ma7_slope'] = current['MA7_slope'] if not pd.isna(current['MA7_slope']) else 0
         
-        # === Combine all signals ===
+        # === SIGNAL TYPES ===
         
-        # Type 1: Fresh crossover with volume
-        signal_1 = fresh_cross and volume_spike and rsi_ok
+        # Type 1: Fresh crossover
+        conditions['signal_1'] = (conditions['fresh_cross'] and 
+                                 conditions['volume_ok'] and 
+                                 conditions['rsi_ok'])
         
-        # Type 2: Already trending (MA7 > MA25, both up, price above)
-        signal_2 = (ma7_above_ma25 and ma7_trending and ma25_trending and 
-                   price_above_mas and volume_ratio > 1.0 and rsi_ok and 
-                   ma_distance < 15)  # Not too extended
+        # Type 2: Trending
+        conditions['signal_2'] = (conditions['ma7_above_ma25'] and 
+                                 conditions['ma7_trending'] and 
+                                 conditions['ma25_trending'] and 
+                                 conditions['price_above_mas'] and 
+                                 conditions['ma_distance_ok'] and 
+                                 conditions['rsi_ok'])
         
-        # Type 3: Strong momentum breakout (like DCR)
-        signal_3 = (strong_momentum and ma7_above_ma25 and 
-                   volume_spike and above_ma200)
+        # Type 3: Momentum breakout
+        conditions['signal_3'] = (conditions['momentum_ok'] and 
+                                 conditions['ma7_above_ma25'] and 
+                                 conditions['volume_ok'] and 
+                                 conditions['above_ma200'])
         
-        # Any signal triggers
-        signal = signal_1 or signal_2 or signal_3
+        # Any signal
+        conditions['signal'] = conditions['signal_1'] or conditions['signal_2'] or conditions['signal_3']
         
         # Determine signal type
-        if signal_1:
-            signal_type = "🟢 FRESH CROSSOVER"
-        elif signal_2:
-            signal_type = "📈 TRENDING"
-        elif signal_3:
-            signal_type = "🚀 MOMENTUM BREAKOUT"
+        if conditions['signal_1']:
+            conditions['signal_type'] = "🟢 FRESH CROSSOVER"
+        elif conditions['signal_2']:
+            conditions['signal_type'] = "📈 TRENDING"
+        elif conditions['signal_3']:
+            conditions['signal_type'] = "🚀 MOMENTUM"
         else:
-            signal_type = "NONE"
+            conditions['signal_type'] = "NONE"
         
-        return {
-            'signal': signal,
-            'signal_type': signal_type,
-            'fresh_cross': fresh_cross,
-            'ma7_above_ma25': ma7_above_ma25,
-            'ma7_trending': ma7_trending,
-            'ma25_trending': ma25_trending,
-            'price_above_mas': price_above_mas,
-            'ma_distance': ma_distance,
-            'strong_momentum': strong_momentum,
-            'volume_ratio': volume_ratio,
-            'volume_spike': volume_spike,
-            'rsi_ok': rsi_ok,
-            'above_ma200': above_ma200,
-            'current_price': current['close'],
-            'ma7': current['MA7'],
-            'ma25': current['MA25'],
-            'ma99': current['MA99'],
-            'ma200': current['MA200'],
-            'rsi': current['RSI'],
-            'atr': current['ATR'],
-            'change_1h': current['change_1h'],
-            'change_4h': current['change_4h'],
-            'change_24h': current['change_24h'],
-            'momentum': current['momentum'],
-            'ma7_slope': current['MA7_slope']
-        }
+        # Add current values
+        conditions['current_price'] = current['close']
+        conditions['ma7'] = current['MA7']
+        conditions['ma25'] = current['MA25']
+        conditions['ma99'] = current['MA99']
+        conditions['ma200'] = current['MA200']
+        conditions['atr'] = current['ATR']
+        
+        # Debug logging every 50 pairs or when signal found
+        self.debug_count += 1
+        if conditions['signal'] or self.debug_count % 50 == 0:
+            logging.info(f"\n🔍 DEBUG: {symbol}")
+            logging.info(f"  MA7>MA25: {conditions['ma7_above_ma25']}")
+            logging.info(f"  Fresh Cross: {conditions['fresh_cross']}")
+            logging.info(f"  Volume: {volume_ratio:.2f}x ({'✅' if conditions['volume_ok'] else '❌'})")
+            logging.info(f"  RSI: {current['RSI']:.1f} ({'✅' if conditions['rsi_ok'] else '❌'})")
+            logging.info(f"  24h Change: {conditions['change_24h']:+.2f}%")
+            logging.info(f"  Signal: {conditions['signal_type']}")
+            logging.info("-" * 50)
+        
+        return conditions
     
-    def calculate_dynamic_targets(self, df, entry_price):
-        current = df.iloc[-1]
-        
-        # ATR-based
-        atr = current['ATR']
-        atr_percent = (atr / entry_price) * 100
+    def calculate_targets(self, entry_price, data):
+        atr = data['atr']
+        atr_percent = (atr / entry_price) * 100 if entry_price > 0 else 3
         
         # Adjust based on momentum
         momentum_factor = 1.0
-        if current['change_24h'] > 15:
-            momentum_factor = 1.8  # High momentum - bigger targets
-        elif current['change_24h'] > 10:
+        if data['change_24h'] > 15:
+            momentum_factor = 1.8
+        elif data['change_24h'] > 10:
             momentum_factor = 1.5
-        elif current['change_24h'] > 5:
-            momentum_factor = 1.2
+        elif data['change_24h'] > 5:
+            momentum_factor = 1.3
         
-        if atr_percent > 5:
-            tp1_percent = max(3, atr_percent * 0.7) * momentum_factor
-            tp2_percent = max(6, atr_percent * 1.3) * momentum_factor
-            tp3_percent = max(10, atr_percent * 2.0) * momentum_factor
-        else:
-            tp1_percent = max(2.5, atr_percent) * momentum_factor
-            tp2_percent = max(5, atr_percent * 1.8) * momentum_factor
-            tp3_percent = max(8, atr_percent * 2.5) * momentum_factor
-        
-        # Stop loss
-        sl_percent = max(2, atr_percent * 1.2)
+        tp1_pct = max(2, atr_percent * 0.8) * momentum_factor
+        tp2_pct = max(4, atr_percent * 1.5) * momentum_factor
+        tp3_pct = max(8, atr_percent * 2.5) * momentum_factor
+        sl_pct = max(1.5, atr_percent * 1.2)
         
         return {
             'entry': entry_price,
-            'tp1': entry_price * (1 + tp1_percent/100),
-            'tp1_percent': round(tp1_percent, 2),
-            'tp2': entry_price * (1 + tp2_percent/100),
-            'tp2_percent': round(tp2_percent, 2),
-            'tp3': entry_price * (1 + tp3_percent/100),
-            'tp3_percent': round(tp3_percent, 2),
-            'sl': entry_price * (1 - sl_percent/100),
-            'sl_percent': round(sl_percent, 2)
+            'tp1': entry_price * (1 + tp1_pct/100),
+            'tp1_percent': round(tp1_pct, 2),
+            'tp2': entry_price * (1 + tp2_pct/100),
+            'tp2_percent': round(tp2_pct, 2),
+            'tp3': entry_price * (1 + tp3_pct/100),
+            'tp3_percent': round(tp3_pct, 2),
+            'sl': entry_price * (1 - sl_pct/100),
+            'sl_percent': round(sl_pct, 2)
         }
     
     def format_message(self, symbol, data, targets):
-        # Price changes
-        change_1h = data['change_1h']
-        change_4h = data['change_4h']
-        change_24h = data['change_24h']
-        
         return f"""
 {data['signal_type']}
-━━━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━
 
-<b>Pair:</b> {symbol}
-💰 <b>Price:</b> ${data['current_price']:.6f}
+<b>{symbol}</b>
+💰 ${data['current_price']:.6f}
 
-━━━━━━━━━━━━━━━━━━━━━━
-📊 <b>PRICE ACTION:</b>
-━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>Indicators:</b>
+├ MA7: ${data['ma7']:.4f}
+├ MA25: ${data['ma25']:.4f}
+├ RSI: {data['rsi']:.1f}
+├ Vol: {data['volume_ratio']:.2f}x
+└ 24h: {data['change_24h']:+.2f}%
 
-├ 1h: {change_1h:+.2f}%
-├ 4h: {change_4h:+.2f}%
-└ 24h: {change_24h:+.2f}%
+🎯 <b>Targets:</b>
+├ TP1: +{targets['tp1_percent']}%
+├ TP2: +{targets['tp2_percent']}%
+├ TP3: +{targets['tp3_percent']}%
+└ SL: -{targets['sl_percent']}%
 
-━━━━━━━━━━━━━━━━━━━━━━
-🟡 <b>MA7/MA25:</b>
-━━━━━━━━━━━━━━━━━━━━━━
-
-🟡 MA7: ${data['ma7']:.4f}
-🟣 MA25: ${data['ma25']:.4f}
-📏 Distance: {data['ma_distance']:+.2f}%
-
-├ MA7 Slope: {data['ma7_slope']:+.2f}%
-└ Position: {'✅ Above' if data['price_above_mas'] else '❌ Below'}
-
-━━━━━━━━━━━━━━━━━━━━━━
-📈 <b>INDICATORS:</b>
-━━━━━━━━━━━━━━━━━━━━━━
-
-├ RSI: {data['rsi']:.2f} {'✅' if data['rsi_ok'] else '⚠️'}
-├ Volume: {data['volume_ratio']:.2f}x
-├ Momentum: {data['momentum']:+.2f}%
-└ Above MA200: {'✅' if data['above_ma200'] else '❌'}
-
-━━━━━━━━━━━━━━━━━━━━━━
-🎯 <b>TARGETS:</b>
-━━━━━━━━━━━━━━━━━━━━━━
-
-🟢 Entry: ${data['current_price']:.6f}
-
-🎯 TP1: ${targets['tp1']:.6f} (+{targets['tp1_percent']}%)
-🎯 TP2: ${targets['tp2']:.6f} (+{targets['tp2_percent']}%)
-🎯 TP3: ${targets['tp3']:.6f} (+{targets['tp3_percent']}%)
-
-🔴 SL: ${targets['sl']:.6f} (-{targets['sl_percent']}%)
-
-📊 R:R: {targets['tp1_percent']/targets['sl_percent']:.2f}
-
-━━━━━━━━━━━━━━━━━━━━━━
-⏰ {datetime.now().strftime('%H:%M:%S')}
-━━━━━━━━━━━━━━━━━━━━━━
+⏰ {datetime.now().strftime('%H:%M')}
 """
     
     def run_scan(self):
@@ -349,8 +302,9 @@ class BinanceScanner:
         if not pairs:
             return 0
         
-        logging.info(f"🔍 Advanced scan ({len(pairs)} pairs)...")
+        logging.info(f"\n🔍 Starting scan of {len(pairs)} pairs...")
         found = 0
+        passed_filters = 0
         
         for symbol in pairs:
             try:
@@ -359,16 +313,20 @@ class BinanceScanner:
                     continue
                 
                 df = self.calculate_indicators(df)
-                data = self.check_all_signals(df)
+                data = self.check_signals_with_debug(symbol, df)
                 
                 if data['signal']:
-                    targets = self.calculate_dynamic_targets(df, data['current_price'])
+                    targets = self.calculate_targets(data['current_price'], data)
                     msg = self.format_message(symbol, data, targets)
                     
                     if self.telegram.send_message(msg):
                         found += 1
                         self.signals_count += 1
-                        logging.info(f"🚀 {symbol} | {data['signal_type']} | 24h: {data['change_24h']:+.2f}%")
+                        logging.info(f"✅ SIGNAL FOUND: {symbol} - {data['signal_type']}")
+                
+                # Count how many pass basic filters
+                if data.get('ma7_above_ma25', False) and data.get('rsi_ok', False):
+                    passed_filters += 1
                 
                 self.analyzed_pairs.add(symbol)
                 
@@ -376,23 +334,13 @@ class BinanceScanner:
                 logging.error(f"❌ Error {symbol}: {e}")
                 continue
         
-        logging.info(f"✅ Done. Found {found} signals")
+        logging.info(f"\n✅ Scan Complete:")
+        logging.info(f"  Total pairs: {len(pairs)}")
+        logging.info(f"  Passed filters: {passed_filters}")
+        logging.info(f"  Signals found: {found}")
+        logging.info("=" * 50)
+        
         return found
-    
-    def send_startup(self):
-        msg = f"""
-🤖 <b>ADVANCED MA7/MA25 BOT</b>
-
-✅ 3 Signal Types:
-🟢 Fresh Crossover
-📈 Trending
-🚀 Momentum Breakout
-
-📊 200 pairs | Every {CONFIG['scan_interval_minutes']} min
-
-⏰ {datetime.now().strftime('%H:%M:%S')}
-"""
-        return self.telegram.send_message(msg)
     
     def send_status(self):
         uptime = datetime.now() - self.start_time if self.start_time else timedelta(0)
@@ -401,7 +349,7 @@ class BinanceScanner:
 
 ✅ Running
 ⏳ {str(uptime).split('.')[0]}
-📊 {len(self.analyzed_pairs)} pairs
+📊 {len(self.analyzed_pairs)} scanned
 📈 {self.signals_count} signals
 """
         return self.telegram.send_message(msg)
@@ -414,14 +362,18 @@ class BinanceScanner:
             logging.error("❌ Telegram test failed!")
             return
         
-        logging.info("✅ Telegram OK!")
-        self.send_startup()
+        logging.info("✅ Bot started successfully!")
+        logging.info(f"Configuration:")
+        logging.info(f"  Min Volume Ratio: {self.config['min_volume_ratio']}")
+        logging.info(f"  RSI Range: {self.config['min_rsi']}-{self.config['max_rsi']}")
+        logging.info(f"  Min 24h Change: {self.config['min_price_change_24h']}%")
+        logging.info(f"  Max MA Distance: {self.config['max_ma_distance']}%")
         
         schedule.every().hour.do(self.send_status)
         self.run_scan()
-        schedule.every(CONFIG['scan_interval_minutes']).minutes.do(self.run_scan)
+        schedule.every(self.config['scan_interval_minutes']).minutes.do(self.run_scan)
         
-        logging.info(f"⏰ Running (scan every {CONFIG['scan_interval_minutes']} min)...")
+        logging.info(f"⏰ Bot running (scan every {self.config['scan_interval_minutes']} min)...")
         
         while True:
             try:
@@ -435,7 +387,7 @@ class BinanceScanner:
 
 def main():
     print("\n" + "=" * 60)
-    print("🤖 ADVANCED MA7/MA25 BOT")
+    print("🤖 ADVANCED BOT - RELAXED CONDITIONS")
     print("=" * 60 + "\n")
     
     if not validate_config():
