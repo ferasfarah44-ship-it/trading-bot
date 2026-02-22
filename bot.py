@@ -42,11 +42,13 @@ def validate_config():
 CONFIG = {
     'telegram_bot_token': os.getenv('TELEGRAM_BOT_TOKEN'),
     'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID'),
-    'ma_fast': 7,        # الخط الأصفر
-    'ma_medium': 25,     # الخط الزهري الغامق
+    'ma_fast': 7,
+    'ma_medium': 25,
     'ma_slow': 99,
     'ma_long': 200,
-    'min_volume_ratio': 1.3,  # Volume spike threshold
+    'min_volume_ratio': 1.0,  # خفضت من 1.3 إلى 1.0
+    'max_rsi': 85,  # زدت من 75 إلى 85
+    'min_rsi': 30,
     'scan_interval_minutes': 5
 }
 
@@ -74,7 +76,7 @@ class TelegramNotifier:
             return False
     
     def test_connection(self):
-        msg = "🔊 <b>BOT TEST</b>\n\n✅ MA7/MA25 Crossover Bot Connected!"
+        msg = "🔊 <b>ADVANCED MA7/MA25 BOT</b>\n\n✅ Connected!"
         return self.send_message(msg)
 
 class BinanceScanner:
@@ -106,13 +108,9 @@ class BinanceScanner:
             return None
     
     def calculate_indicators(self, df):
-        # MA7 (Yellow Line) - الخط الأصفر
+        # MAs
         df['MA7'] = df['close'].rolling(window=self.config['ma_fast']).mean()
-        
-        # MA25 (Dark Pink Line) - الخط الزهري الغامق
         df['MA25'] = df['close'].rolling(window=self.config['ma_medium']).mean()
-        
-        # MA99 و MA200
         df['MA99'] = df['close'].rolling(window=self.config['ma_slow']).mean()
         df['MA200'] = df['close'].rolling(window=self.config['ma_long']).mean()
         
@@ -122,7 +120,7 @@ class BinanceScanner:
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
         df['RSI'] = 100 - (100 / (1 + gain/loss))
         
-        # Volume MA
+        # Volume
         df['volume_MA'] = df['volume'].rolling(window=20).mean()
         
         # ATR
@@ -135,80 +133,103 @@ class BinanceScanner:
         )
         df['ATR'] = df['tr'].rolling(window=14).mean()
         
-        # MACD
-        exp1 = df['close'].ewm(span=12, adjust=False).mean()
-        exp2 = df['close'].ewm(span=26, adjust=False).mean()
-        df['MACD'] = exp1 - exp2
-        df['MACD_signal'] = df['MACD'].ewm(span=9, adjust=False).mean()
+        # Price changes
+        df['change_1h'] = df['close'].pct_change(1) * 100
+        df['change_4h'] = df['close'].pct_change(4) * 100
+        df['change_24h'] = df['close'].pct_change(24) * 100
+        
+        # Momentum
+        df['momentum'] = df['close'].pct_change(14) * 100
+        
+        # MA slopes
+        df['MA7_slope'] = df['MA7'].pct_change(3) * 100
+        df['MA25_slope'] = df['MA25'].pct_change(3) * 100
         
         return df
     
-    def check_ma7_ma25_crossover(self, df):
+    def check_all_signals(self, df):
         """
-        Check for MA7/MA25 crossover
-        MA7 = Yellow line (الخط الأصفر)
-        MA25 = Dark Pink line (الخط الزهري الغامق)
+        Check MULTIPLE signal types:
+        1. Fresh crossover
+        2. Already trending
+        3. Strong momentum breakout
+        4. Volume spike
         """
         if len(df) < 30:
             return {'signal': False}
         
         current = df.iloc[-1]
         previous = df.iloc[-2]
-        previous2 = df.iloc[-3]
         
-        # 🟢 BULLISH CROSSOVER: MA7 crosses ABOVE MA25
-        # الخط الأصفر يعبر فوق الزهري
-        bullish_cross = (previous['MA7'] <= previous['MA25'] and 
-                        current['MA7'] > current['MA25'])
+        # === SIGNAL TYPE 1: Fresh MA7/MA25 Crossover ===
+        fresh_cross = (previous['MA7'] <= previous['MA25'] and 
+                      current['MA7'] > current['MA25'])
         
-        # 🔴 BEARISH CROSSOVER: MA7 crosses BELOW MA25
-        # الخط الأصفر يعبر تحت الزهري
-        bearish_cross = (previous['MA7'] >= previous['MA25'] and 
-                        current['MA7'] < current['MA25'])
-        
-        # MA7 above MA25 (already crossed)
+        # === SIGNAL TYPE 2: Already Trending (MA7 above MA25) ===
         ma7_above_ma25 = current['MA7'] > current['MA25']
-        
-        # Distance between MA7 and MA25
-        ma_distance = ((current['MA7'] - current['MA25']) / current['MA25']) * 100
-        
-        # MA7 trending up
-        ma7_trending_up = current['MA7'] > previous['MA7']
-        
-        # MA25 trending up
-        ma25_trending_up = current['MA25'] > previous['MA25']
-        
-        # Price above both MAs
+        ma7_trending = current['MA7'] > previous['MA7']
+        ma25_trending = current['MA25'] > previous['MA25']
         price_above_mas = current['close'] > max(current['MA7'], current['MA25'])
         
-        # Volume confirmation
+        # Distance between MAs
+        ma_distance = ((current['MA7'] - current['MA25']) / current['MA25']) * 100
+        
+        # === SIGNAL TYPE 3: Strong Momentum ===
+        strong_momentum = (current['change_24h'] > 10 and  # +10% in 24h
+                          current['momentum'] > 5 and
+                          current['MA7_slope'] > 0)
+        
+        # === SIGNAL TYPE 4: Volume Spike ===
         volume_ratio = current['volume'] / current['volume_MA'] if current['volume_MA'] > 0 else 0
-        volume_ok = volume_ratio > self.config['min_volume_ratio']
+        volume_spike = volume_ratio > self.config['min_volume_ratio']
         
-        # RSI confirmation
-        rsi_ok = 35 < current['RSI'] < 75
+        # === RSI Check (More Flexible) ===
+        rsi_ok = self.config['min_rsi'] < current['RSI'] < self.config['max_rsi']
         
-        # Strong bullish signal
-        strong_bullish = (bullish_cross and volume_ok and rsi_ok and 
-                         ma7_trending_up and price_above_mas)
+        # === Price above MA200 (Long term trend) ===
+        above_ma200 = current['close'] > current['MA200']
         
-        # Regular bullish signal
-        regular_bullish = (ma7_above_ma25 and ma7_trending_up and 
-                          price_above_mas and volume_ratio > 1.0 and rsi_ok)
+        # === Combine all signals ===
+        
+        # Type 1: Fresh crossover with volume
+        signal_1 = fresh_cross and volume_spike and rsi_ok
+        
+        # Type 2: Already trending (MA7 > MA25, both up, price above)
+        signal_2 = (ma7_above_ma25 and ma7_trending and ma25_trending and 
+                   price_above_mas and volume_ratio > 1.0 and rsi_ok and 
+                   ma_distance < 15)  # Not too extended
+        
+        # Type 3: Strong momentum breakout (like DCR)
+        signal_3 = (strong_momentum and ma7_above_ma25 and 
+                   volume_spike and above_ma200)
+        
+        # Any signal triggers
+        signal = signal_1 or signal_2 or signal_3
+        
+        # Determine signal type
+        if signal_1:
+            signal_type = "🟢 FRESH CROSSOVER"
+        elif signal_2:
+            signal_type = "📈 TRENDING"
+        elif signal_3:
+            signal_type = "🚀 MOMENTUM BREAKOUT"
+        else:
+            signal_type = "NONE"
         
         return {
-            'signal': strong_bullish or regular_bullish,
-            'type': 'BULLISH' if (bullish_cross or ma7_above_ma25) else 'BEARISH',
-            'bullish_cross': bullish_cross,
-            'bearish_cross': bearish_cross,
+            'signal': signal,
+            'signal_type': signal_type,
+            'fresh_cross': fresh_cross,
             'ma7_above_ma25': ma7_above_ma25,
-            'ma_distance_percent': ma_distance,
-            'ma7_trending_up': ma7_trending_up,
-            'ma25_trending_up': ma25_trending_up,
+            'ma7_trending': ma7_trending,
+            'ma25_trending': ma25_trending,
             'price_above_mas': price_above_mas,
+            'ma_distance': ma_distance,
+            'strong_momentum': strong_momentum,
             'volume_ratio': volume_ratio,
-            'volume_ok': volume_ok,
+            'volume_spike': volume_spike,
             'rsi_ok': rsi_ok,
+            'above_ma200': above_ma200,
             'current_price': current['close'],
             'ma7': current['MA7'],
             'ma25': current['MA25'],
@@ -216,27 +237,37 @@ class BinanceScanner:
             'ma200': current['MA200'],
             'rsi': current['RSI'],
             'atr': current['ATR'],
-            'macd': current['MACD'],
-            'macd_signal': current['MACD_signal']
+            'change_1h': current['change_1h'],
+            'change_4h': current['change_4h'],
+            'change_24h': current['change_24h'],
+            'momentum': current['momentum'],
+            'ma7_slope': current['MA7_slope']
         }
     
     def calculate_dynamic_targets(self, df, entry_price):
-        """Calculate targets based on ATR and market conditions"""
         current = df.iloc[-1]
         
-        # ATR-based calculation
+        # ATR-based
         atr = current['ATR']
         atr_percent = (atr / entry_price) * 100
         
-        # Adjust targets based on volatility
+        # Adjust based on momentum
+        momentum_factor = 1.0
+        if current['change_24h'] > 15:
+            momentum_factor = 1.8  # High momentum - bigger targets
+        elif current['change_24h'] > 10:
+            momentum_factor = 1.5
+        elif current['change_24h'] > 5:
+            momentum_factor = 1.2
+        
         if atr_percent > 5:
-            tp1_percent = max(3, atr_percent * 0.7)
-            tp2_percent = max(6, atr_percent * 1.3)
-            tp3_percent = max(10, atr_percent * 2.0)
+            tp1_percent = max(3, atr_percent * 0.7) * momentum_factor
+            tp2_percent = max(6, atr_percent * 1.3) * momentum_factor
+            tp3_percent = max(10, atr_percent * 2.0) * momentum_factor
         else:
-            tp1_percent = max(2.5, atr_percent)
-            tp2_percent = max(5, atr_percent * 1.8)
-            tp3_percent = max(8, atr_percent * 2.5)
+            tp1_percent = max(2.5, atr_percent) * momentum_factor
+            tp2_percent = max(5, atr_percent * 1.8) * momentum_factor
+            tp3_percent = max(8, atr_percent * 2.5) * momentum_factor
         
         # Stop loss
         sl_percent = max(2, atr_percent * 1.2)
@@ -250,59 +281,67 @@ class BinanceScanner:
             'tp3': entry_price * (1 + tp3_percent/100),
             'tp3_percent': round(tp3_percent, 2),
             'sl': entry_price * (1 - sl_percent/100),
-            'sl_percent': round(sl_percent, 2),
-            'atr': atr,
-            'atr_percent': round(atr_percent, 2)
+            'sl_percent': round(sl_percent, 2)
         }
     
     def format_message(self, symbol, data, targets):
-        cross_type = "🟢 BULLISH CROSSOVER" if data['bullish_cross'] else "📈 TRENDING UP"
+        # Price changes
+        change_1h = data['change_1h']
+        change_4h = data['change_4h']
+        change_24h = data['change_24h']
         
         return f"""
-{cross_type}
-━━━━━━━━━━━━━━━━━━━━
+{data['signal_type']}
+━━━━━━━━━━━━━━━━━━━━━━
 
 <b>Pair:</b> {symbol}
 💰 <b>Price:</b> ${data['current_price']:.6f}
 
-━━━━━━━━━━━━━━━━━━━━
-📊 <b>MA7/MA25 ANALYSIS:</b>
-━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━
+📊 <b>PRICE ACTION:</b>
+━━━━━━━━━━━━━━━━━━━━━━
 
-🟡 <b>MA7 (Yellow):</b> ${data['ma7']:.4f}
-💗 <b>MA25 (Pink):</b> ${data['ma25']:.4f}
-📏 <b>Distance:</b> {data['ma_distance_percent']:+.2f}%
+├ 1h: {change_1h:+.2f}%
+├ 4h: {change_4h:+.2f}%
+└ 24h: {change_24h:+.2f}%
 
-├ MA7 Trend: {'⬆️ UP' if data['ma7_trending_up'] else '⬇️ DOWN'}
-├ MA25 Trend: {'⬆️ UP' if data['ma25_trending_up'] else '⬇️ DOWN'}
-└ Price Position: {'✅ Above Both' if data['price_above_mas'] else '❌ Below'}
+━━━━━━━━━━━━━━━━━━━━━━
+🟡 <b>MA7/MA25:</b>
+━━━━━━━━━━━━━━━━━━━━━━
 
-━━━━━━━━━━━━━━━━━━━━
-📈 <b>CONFIRMATION:</b>
-━━━━━━━━━━━━━━━━━━━━
+🟡 MA7: ${data['ma7']:.4f}
+🟣 MA25: ${data['ma25']:.4f}
+📏 Distance: {data['ma_distance']:+.2f}%
 
-├ Volume: {data['volume_ratio']:.2f}x {'✅' if data['volume_ok'] else '⚠️'}
+├ MA7 Slope: {data['ma7_slope']:+.2f}%
+└ Position: {'✅ Above' if data['price_above_mas'] else '❌ Below'}
+
+━━━━━━━━━━━━━━━━━━━━━━
+📈 <b>INDICATORS:</b>
+━━━━━━━━━━━━━━━━━━━━━━
+
 ├ RSI: {data['rsi']:.2f} {'✅' if data['rsi_ok'] else '⚠️'}
-├ MACD: {data['macd']:.4f}
-└ ATR: ${data['atr']:.4f} ({data['atr'] / data['current_price'] * 100:.2f}%)
+├ Volume: {data['volume_ratio']:.2f}x
+├ Momentum: {data['momentum']:+.2f}%
+└ Above MA200: {'✅' if data['above_ma200'] else '❌'}
 
-━━━━━━━━━━━━━━━━━━━━
-🎯 <b>DYNAMIC TARGETS:</b>
-━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━
+🎯 <b>TARGETS:</b>
+━━━━━━━━━━━━━━━━━━━━━━
 
-🟢 Entry: ${targets['entry']:.6f}
+🟢 Entry: ${data['current_price']:.6f}
 
 🎯 TP1: ${targets['tp1']:.6f} (+{targets['tp1_percent']}%)
 🎯 TP2: ${targets['tp2']:.6f} (+{targets['tp2_percent']}%)
 🎯 TP3: ${targets['tp3']:.6f} (+{targets['tp3_percent']}%)
 
-🔴 Stop Loss: ${targets['sl']:.6f} (-{targets['sl_percent']}%)
+🔴 SL: ${targets['sl']:.6f} (-{targets['sl_percent']}%)
 
-📊 R:R Ratio: {targets['tp1_percent']/targets['sl_percent']:.2f}
+📊 R:R: {targets['tp1_percent']/targets['sl_percent']:.2f}
 
-━━━━━━━━━━━━━━━━━━━━
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-━━━━━━━━━━━━━━━━━━━━
+━━━━━━━━━━━━━━━━━━━━━━
+⏰ {datetime.now().strftime('%H:%M:%S')}
+━━━━━━━━━━━━━━━━━━━━━━
 """
     
     def run_scan(self):
@@ -310,7 +349,7 @@ class BinanceScanner:
         if not pairs:
             return 0
         
-        logging.info(f"🔍 Scanning {len(pairs)} pairs for MA7/MA25 crossover...")
+        logging.info(f"🔍 Advanced scan ({len(pairs)} pairs)...")
         found = 0
         
         for symbol in pairs:
@@ -320,7 +359,7 @@ class BinanceScanner:
                     continue
                 
                 df = self.calculate_indicators(df)
-                data = self.check_ma7_ma25_crossover(df)
+                data = self.check_all_signals(df)
                 
                 if data['signal']:
                     targets = self.calculate_dynamic_targets(df, data['current_price'])
@@ -329,7 +368,7 @@ class BinanceScanner:
                     if self.telegram.send_message(msg):
                         found += 1
                         self.signals_count += 1
-                        logging.info(f"🚀 {symbol} | MA7/MA25 Cross | Vol: {data['volume_ratio']:.2f}x")
+                        logging.info(f"🚀 {symbol} | {data['signal_type']} | 24h: {data['change_24h']:+.2f}%")
                 
                 self.analyzed_pairs.add(symbol)
                 
@@ -337,20 +376,21 @@ class BinanceScanner:
                 logging.error(f"❌ Error {symbol}: {e}")
                 continue
         
-        logging.info(f"✅ Done. Found {found} MA7/MA25 signals")
+        logging.info(f"✅ Done. Found {found} signals")
         return found
     
     def send_startup(self):
         msg = f"""
-🤖 <b>MA7/MA25 CROSSOVER BOT</b>
+🤖 <b>ADVANCED MA7/MA25 BOT</b>
 
-✅ Bot Started
-📊 200 USDT pairs
-🟡 MA7 (Yellow Line)
-💗 MA25 (Dark Pink Line)
-⏱️ Scan: Every {CONFIG['scan_interval_minutes']} min
+✅ 3 Signal Types:
+🟢 Fresh Crossover
+📈 Trending
+🚀 Momentum Breakout
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+📊 200 pairs | Every {CONFIG['scan_interval_minutes']} min
+
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
         return self.telegram.send_message(msg)
     
@@ -362,12 +402,12 @@ class BinanceScanner:
 ✅ Running
 ⏳ {str(uptime).split('.')[0]}
 📊 {len(self.analyzed_pairs)} pairs
-📈 {self.signals_count} MA7/MA25 signals
+📈 {self.signals_count} signals
 """
         return self.telegram.send_message(msg)
     
     def run(self):
-        logging.info("🚀 Starting MA7/MA25 Crossover Bot...")
+        logging.info("🚀 Starting Advanced Bot...")
         self.start_time = datetime.now()
         
         if not self.telegram.test_connection():
@@ -395,7 +435,7 @@ class BinanceScanner:
 
 def main():
     print("\n" + "=" * 60)
-    print("🤖 MA7/MA25 CROSSOVER TRADING BOT")
+    print("🤖 ADVANCED MA7/MA25 BOT")
     print("=" * 60 + "\n")
     
     if not validate_config():
