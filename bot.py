@@ -1,17 +1,15 @@
 import ccxt
 import pandas as pd
-import numpy as np
 import time
 import requests
 from datetime import datetime, timedelta
 import logging
-from typing import Dict, List, Optional
 import schedule
 import os
-from dotenv import load_dotenv
 import sys
 
 # Load environment variables
+from dotenv import load_dotenv
 load_dotenv()
 
 # Setup logging
@@ -24,73 +22,37 @@ logging.basicConfig(
     ]
 )
 
-def validate_telegram_token():
-    """Validate Telegram token before anything else"""
-    print("=" * 70)
-    print("🔍 VALIDATING TELEGRAM CREDENTIALS")
-    print("=" * 70)
+def validate_config():
+    """Validate Telegram credentials"""
+    print("=" * 60)
+    print("🔍 VALIDATING CONFIGURATION")
+    print("=" * 60)
     
-    token = os.getenv('8303823776:AAGW3VhBU3Mo3GPiCzpQqaKIkzlE4mi664w)
-    chat_id = os.getenv('7960335113)
+    token = os.getenv('TELEGRAM_BOT_TOKEN')
+    chat_id = os.getenv('TELEGRAM_CHAT_ID')
     
-    print(f"\n📱 TELEGRAM_BOT_TOKEN:")
-    print(f"   Type: {type(token)}")
-    print(f"   Value: '{token}'")
-    print(f"   Is None: {token is None}")
-    print(f"   Is 'None' string: {token == 'None'}")
+    print(f"\n📱 TELEGRAM_BOT_TOKEN: {'✅ Found' if token else '❌ Missing'}")
+    print(f"👤 TELEGRAM_CHAT_ID: {'✅ Found' if chat_id else '❌ Missing'}\n")
     
-    print(f"\n👤 TELEGRAM_CHAT_ID:")
-    print(f"   Type: {type(chat_id)}")
-    print(f"   Value: '{chat_id}'")
-    print(f"   Is None: {chat_id is None}")
-    
-    # Check for common mistakes
-    if token is None:
-        print("\n❌ ERROR: TELEGRAM_BOT_TOKEN is None!")
-        print("   → Variable not set in Railway")
+    if not token or token == 'None':
+        print("❌ ERROR: TELEGRAM_BOT_TOKEN is missing or invalid!")
+        print("   Add it in Railway Variables section")
         return False
     
-    if token == 'None':
-        print("\n❌ ERROR: TELEGRAM_BOT_TOKEN is the string 'None'!")
-        print("   → You added the word 'None' instead of actual token")
-        print("   → Get real token from @BotFather on Telegram")
+    if not chat_id or chat_id == 'None':
+        print("❌ ERROR: TELEGRAM_CHAT_ID is missing or invalid!")
+        print("   Add it in Railway Variables section")
         return False
     
-    if token == 'your_telegram_bot_token_here':
-        print("\n❌ ERROR: TELEGRAM_BOT_TOKEN is default value!")
-        print("   → Replace with your actual bot token")
-        return False
-    
-    if not token or len(token) < 40:
-        print("\n❌ ERROR: TELEGRAM_BOT_TOKEN is too short!")
-        print("   → Token should be like: 1234567890:ABCdef...")
-        return False
-    
-    if chat_id is None:
-        print("\n❌ ERROR: TELEGRAM_CHAT_ID is None!")
-        return False
-    
-    print("\n✅ Credentials look good!")
-    print("=" * 70)
+    print("✅ Configuration valid!")
     return True
 
 # Configuration
 CONFIG = {
     'telegram_bot_token': os.getenv('TELEGRAM_BOT_TOKEN'),
     'telegram_chat_id': os.getenv('TELEGRAM_CHAT_ID'),
-    'ma_periods': {
-        'fast': 7,
-        'medium': 25,
-        'slow': 99,
-        'long': 200
-    },
-    'targets': {
-        'tp1_percent': 3,
-        'tp2_percent': 6,
-        'tp3_percent': 10,
-        'stop_loss': 2
-    },
-    'min_volume_24h': 1000000,
+    'ma_periods': {'fast': 7, 'medium': 25, 'slow': 99, 'long': 200},
+    'targets': {'tp1_percent': 3, 'tp2_percent': 6, 'tp3_percent': 10, 'stop_loss': 2},
     'scan_interval_minutes': 5
 }
 
@@ -100,196 +62,124 @@ class TelegramNotifier:
         self.chat_id = chat_id
         self.base_url = f"https://api.telegram.org/bot{bot_token}"
     
-    def send_message(self, message: str, parse_mode: str = "HTML") -> bool:
+    def send_message(self, message: str) -> bool:
         try:
             url = f"{self.base_url}/sendMessage"
             data = {
                 'chat_id': self.chat_id,
                 'text': message,
-                'parse_mode': parse_mode,
+                'parse_mode': "HTML",
                 'disable_web_page_preview': True
             }
             response = requests.post(url, json=data, timeout=10)
             response.raise_for_status()
-            logging.info("✅ Telegram message sent successfully")
+            logging.info("✅ Telegram message sent")
             return True
         except Exception as e:
-            logging.error(f"❌ Failed to send Telegram message: {e}")
+            logging.error(f"❌ Telegram error: {e}")
             return False
     
-    def test_connection(self) -> bool:
-        message = "🔊 <b>BOT CONNECTION TEST</b>\n\n✅ Bot is connected!\n🕐 " + datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-        return self.send_message(message)
+    def test_connection(self):
+        msg = "🔊 <b>BOT TEST</b>\n\n✅ Connected!"
+        return self.send_message(msg)
 
 class BinanceScanner:
-    def __init__(self, config: Dict):
+    def __init__(self, config):
         self.config = config
-        self.exchange = ccxt.binance({
-            'enableRateLimit': True,
-            'options': {'defaultType': 'spot'}
-        })
-        self.telegram = TelegramNotifier(
-            config['telegram_bot_token'],
-            config['telegram_chat_id']
-        )
-        self.analyzed_pairs = set()
+        self.exchange = ccxt.binance({'enableRateLimit': True, 'options': {'defaultType': 'spot'}})
+        self.telegram = TelegramNotifier(config['telegram_bot_token'], config['telegram_chat_id'])
         self.start_time = None
         self.signals_count = 0
+        self.analyzed_pairs = set()
     
-    def get_usdt_pairs(self) -> List[str]:
+    def get_usdt_pairs(self):
         try:
             markets = self.exchange.load_markets()
-            usdt_pairs = [
-                symbol for symbol in markets.keys() 
-                if symbol.endswith('/USDT') and not symbol.startswith('1000')
-            ]
-            usdt_pairs.sort()
-            logging.info(f"✅ Found {len(usdt_pairs)} USDT pairs")
-            return usdt_pairs[:200]
+            pairs = [s for s in markets.keys() if s.endswith('/USDT') and not s.startswith('1000')]
+            return sorted(pairs)[:200]
         except Exception as e:
-            logging.error(f"❌ Error fetching USDT pairs: {e}")
+            logging.error(f"❌ Error getting pairs: {e}")
             return []
     
-    def get_ohlcv_data(self, symbol: str, timeframe: str = '1h', limit: int = 300) -> Optional[pd.DataFrame]:
+    def get_ohlcv_data(self, symbol, timeframe='1h', limit=300):
         try:
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
             df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
             df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
             return df
         except Exception as e:
-            logging.error(f"❌ Error fetching data for {symbol}: {e}")
+            logging.error(f"❌ Error fetching {symbol}: {e}")
             return None
     
-    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
-        df['MA7'] = df['close'].rolling(window=self.config['ma_periods']['fast']).mean()
-        df['MA25'] = df['close'].rolling(window=self.config['ma_periods']['medium']).mean()
-        df['MA99'] = df['close'].rolling(window=self.config['ma_periods']['slow']).mean()
-        df['MA200'] = df['close'].rolling(window=self.config['ma_periods']['long']).mean()
+    def calculate_indicators(self, df):
+        df['MA7'] = df['close'].rolling(window=7).mean()
+        df['MA25'] = df['close'].rolling(window=25).mean()
+        df['MA99'] = df['close'].rolling(window=99).mean()
+        df['MA200'] = df['close'].rolling(window=200).mean()
         
         delta = df['close'].diff()
         gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
         loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
+        df['RSI'] = 100 - (100 / (1 + gain/loss))
         df['volume_MA'] = df['volume'].rolling(window=20).mean()
-        
         return df
     
-    def check_buy_signal(self, df: pd.DataFrame) -> Dict:
+    def check_signal(self, df):
         if len(df) < 200:
             return {'signal': False}
         
         current = df.iloc[-1]
         previous = df.iloc[-2]
         
-        ma7_crossed_up = (previous['MA7'] <= previous['MA25'] and current['MA7'] > current['MA25'])
-        price_above_ma7 = current['close'] > current['MA7']
-        ma7_trending_up = current['MA7'] > previous['MA7']
-        volume_spike = current['volume'] > (current['volume_MA'] * 1.5)
+        ma7_cross = previous['MA7'] <= previous['MA25'] and current['MA7'] > current['MA25']
+        price_above = current['close'] > current['MA7']
+        ma7_up = current['MA7'] > previous['MA7']
+        vol_spike = current['volume'] > (current['volume_MA'] * 1.5)
         rsi_ok = 30 < current['RSI'] < 70
-        price_change_24h = ((current['close'] - df.iloc[-24]['close']) / df.iloc[-24]['close']) * 100 if len(df) >= 24 else 0
         
-        signal = (ma7_crossed_up or (price_above_ma7 and ma7_trending_up)) and volume_spike and rsi_ok
+        signal = (ma7_cross or (price_above and ma7_up)) and vol_spike and rsi_ok
         
         return {
             'signal': signal,
-            'ma7_crossed_up': ma7_crossed_up,
-            'price_above_ma7': price_above_ma7,
-            'ma7_trending_up': ma7_trending_up,
-            'volume_spike': volume_spike,
-            'rsi': current['RSI'],
-            'price_change_24h': price_change_24h,
             'current_price': current['close'],
             'ma7': current['MA7'],
             'ma25': current['MA25'],
             'ma99': current['MA99'],
             'ma200': current['MA200'],
-            'volume': current['volume']
+            'rsi': current['RSI'],
+            'price_change_24h': ((current['close'] - df.iloc[-24]['close']) / df.iloc[-24]['close']) * 100 if len(df) >= 24 else 0
         }
     
-    def calculate_targets(self, entry_price: float) -> Dict:
-        tp1 = entry_price * (1 + self.config['targets']['tp1_percent'] / 100)
-        tp2 = entry_price * (1 + self.config['targets']['tp2_percent'] / 100)
-        tp3 = entry_price * (1 + self.config['targets']['tp3_percent'] / 100)
-        sl = entry_price * (1 - self.config['targets']['stop_loss'] / 100)
-        
+    def calculate_targets(self, price):
         return {
-            'entry': entry_price,
-            'tp1': tp1,
-            'tp1_percent': f"+{self.config['targets']['tp1_percent']}%",
-            'tp2': tp2,
-            'tp2_percent': f"+{self.config['targets']['tp2_percent']}%",
-            'tp3': tp3,
-            'tp3_percent': f"+{self.config['targets']['tp3_percent']}%",
-            'stop_loss': sl,
-            'stop_loss_percent': f"-{self.config['targets']['stop_loss']}%"
+            'entry': price,
+            'tp1': price * 1.03,
+            'tp2': price * 1.06,
+            'tp3': price * 1.10,
+            'sl': price * 0.98
         }
     
-    def format_signal_message(self, symbol: str, signal_data: Dict, targets: Dict) -> str:
+    def format_message(self, symbol, data, targets):
         return f"""
-🚀 <b>NEW TRADING SIGNAL!</b> 🚀
+🚀 <b>NEW SIGNAL!</b>
 
 <b>Pair:</b> {symbol}
-💰 <b>Price:</b> ${signal_data['current_price']:.6f}
+💰 <b>Price:</b> ${data['current_price']:.6f}
 
-📈 <b>Analysis:</b>
-├ MA7: ${signal_data['ma7']:.6f}
-├ MA25: ${signal_data['ma25']:.6f}
-├ RSI: {signal_data['rsi']:.2f}
-└ 24h: {signal_data['price_change_24h']:+.2f}%
+📈 <b>Indicators:</b>
+├ MA7: ${data['ma7']:.6f}
+├ MA25: ${data['ma25']:.6f}
+├ RSI: {data['rsi']:.2f}
+└ 24h: {data['price_change_24h']:+.2f}%
 
 🎯 <b>Targets:</b>
-├ Entry: ${targets['entry']:.6f}
 ├ TP1: ${targets['tp1']:.6f} (+3%)
 ├ TP2: ${targets['tp2']:.6f} (+6%)
 ├ TP3: ${targets['tp3']:.6f} (+10%)
-└ SL: ${targets['stop_loss']:.6f} (-2%)
+└ SL: ${targets['sl']:.6f} (-2%)
 
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+⏰ {datetime.now().strftime('%H:%M:%S')}
 """
-    
-    def analyze_pair(self, symbol: str) -> Optional[Dict]:
-        try:
-            df = self.get_ohlcv_data(symbol, timeframe='1h', limit=300)
-            if df is None or len(df) < 200:
-                return None
-            
-            df = self.calculate_indicators(df)
-            signal_data = self.check_buy_signal(df)
-            
-            if signal_data['signal']:
-                targets = self.calculate_targets(signal_data['current_price'])
-                return {'symbol': symbol, 'signal_data': signal_data, 'targets': targets}
-            
-            return None
-        except Exception as e:
-            logging.error(f"❌ Error analyzing {symbol}: {e}")
-            return None
-    
-    def send_startup_message(self):
-        message = f"""
-🤖 <b>BOT STARTED</b> 🤖
-
-✅ Bot is running
-📊 Monitoring: 200 USDT pairs
-📈 Strategy: MA7 Crossover
-⏱️ Scan: Every {CONFIG['scan_interval_minutes']} min
-
-⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-        return self.telegram.send_message(message)
-    
-    def send_hourly_status(self):
-        uptime = datetime.now() - self.start_time if self.start_time else timedelta(0)
-        message = f"""
-⏰ <b>HOURLY STATUS</b>
-
-✅ Bot running
-⏳ Uptime: {str(uptime).split('.')[0]}
-📊 Pairs: {len(self.analyzed_pairs)}
-📈 Signals: {self.signals_count}
-"""
-        return self.telegram.send_message(message)
     
     def run_scan(self):
         pairs = self.get_usdt_pairs()
@@ -297,49 +187,71 @@ class BinanceScanner:
             return 0
         
         logging.info(f"🔍 Scanning {len(pairs)} pairs...")
-        signals_found = 0
+        found = 0
         
-        for i, symbol in enumerate(pairs, 1):
+        for symbol in pairs:
             try:
-                time.sleep(0.1)
-                result = self.analyze_pair(symbol)
+                df = self.get_ohlcv_data(symbol)
+                if df is None:
+                    continue
                 
-                if result:
-                    message = self.format_signal_message(
-                        result['symbol'],
-                        result['signal_data'],
-                        result['targets']
-                    )
-                    if self.telegram.send_message(message):
-                        signals_found += 1
+                df = self.calculate_indicators(df)
+                data = self.check_signal(df)
+                
+                if data['signal']:
+                    targets = self.calculate_targets(data['current_price'])
+                    msg = self.format_message(symbol, data, targets)
+                    if self.telegram.send_message(msg):
+                        found += 1
                         self.signals_count += 1
                         logging.info(f"🚀 Signal: {symbol}")
                 
                 self.analyzed_pairs.add(symbol)
                 
-                if i % 50 == 0:
-                    logging.info(f"📊 Progress: {i}/{len(pairs)}")
-                    
             except Exception as e:
                 logging.error(f"❌ Error {symbol}: {e}")
                 continue
         
-        logging.info(f"✅ Done. Found {signals_found} signals.")
-        return signals_found
+        logging.info(f"✅ Done. Found {found} signals")
+        return found
+    
+    def send_startup(self):
+        msg = f"""
+🤖 <b>BOT STARTED</b>
+
+✅ Running
+📊 200 USDT pairs
+📈 MA7 Strategy
+⏱️ Every {CONFIG['scan_interval_minutes']} min
+
+⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
+"""
+        return self.telegram.send_message(msg)
+    
+    def send_status(self):
+        uptime = datetime.now() - self.start_time if self.start_time else timedelta(0)
+        msg = f"""
+⏰ <b>STATUS</b>
+
+✅ Running
+⏳ {str(uptime).split('.')[0]}
+📊 {len(self.analyzed_pairs)} pairs
+📈 {self.signals_count} signals
+"""
+        return self.telegram.send_message(msg)
     
     def run(self):
         logging.info("🚀 Starting Bot...")
         self.start_time = datetime.now()
         
-        logging.info("📱 Testing Telegram...")
         if not self.telegram.test_connection():
-            logging.error("❌ Telegram test FAILED!")
+            logging.error("❌ Telegram test failed!")
             return
         
         logging.info("✅ Telegram OK!")
-        self.send_startup_message()
+        self.send_startup()
         
-        schedule.every().hour.do(self.send_hourly_status)
+        schedule.every().hour.do(self.send_status)
         self.run_scan()
         schedule.every(CONFIG['scan_interval_minutes']).minutes.do(self.run_scan)
         
@@ -356,22 +268,15 @@ class BinanceScanner:
                 time.sleep(5)
 
 def main():
-    print("\n" + "=" * 70)
-    print("🤖 CRYPTO TRADING BOT - MA7 STRATEGY")
-    print("=" * 70 + "\n")
+    print("\n" + "=" * 60)
+    print("🤖 CRYPTO TRADING BOT")
+    print("=" * 60 + "\n")
     
-    if not validate_telegram_token():
-        print("\n❌ VALIDATION FAILED - Fix errors and redeploy\n")
+    if not validate_config():
         sys.exit(1)
     
-    print("✅ Validation passed\n")
-    
-    try:
-        bot = BinanceScanner(CONFIG)
-        bot.run()
-    except Exception as e:
-        logging.error(f"❌ Fatal: {e}")
-        sys.exit(1)
+    bot = BinanceScanner(CONFIG)
+    bot.run()
 
 if __name__ == "__main__":
     main()
