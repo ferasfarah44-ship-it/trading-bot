@@ -33,7 +33,11 @@ class TelegramNotifier:
     def send_message(self, message):
         try:
             url = f"{self.base_url}/sendMessage"
-            data = {'chat_id': self.chat_id, 'text': message, 'parse_mode': "HTML"}
+            data = {
+                'chat_id': self.chat_id,
+                'text': message,
+                'parse_mode': "HTML"
+            }
             requests.post(url, json=data, timeout=10)
         except Exception as e:
             logging.error(f"Telegram Error: {e}")
@@ -46,12 +50,15 @@ class BinanceScanner:
             config['telegram_bot_token'],
             config['telegram_chat_id']
         )
-    
+
     def get_data(self, symbol):
         try:
             # فريم 15 دقيقة
             ohlcv = self.exchange.fetch_ohlcv(symbol, timeframe='15m', limit=100)
-            df = pd.DataFrame(ohlcv, columns=['ts', 'open', 'high', 'low', 'close', 'volume'])
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['ts', 'open', 'high', 'low', 'close', 'volume']
+            )
 
             df['MA7'] = df['close'].rolling(window=self.config['ma_fast']).mean()
             df['MA25'] = df['close'].rolling(window=self.config['ma_medium']).mean()
@@ -61,18 +68,17 @@ class BinanceScanner:
             return None
 
     def check_signal(self, symbol, df):
-        if len(df) < 30:
+        if len(df) < 10:
             return None
-        
+
         curr = df.iloc[-1]
         prev = df.iloc[-2]
-        old = df.iloc[-3]
 
         # 🔹 شرط التقاطع
         cross_up = (curr['MA7'] > curr['MA25']) and (prev['MA7'] <= prev['MA25'])
 
-        # 🔹 شرط ارتفاع الأصفر (3 شموع متتالية صاعدة)
-        ma7_rising = curr['MA7'] > prev['MA7'] > old['MA7']
+        # 🔹 شرط ارتفاع الأصفر فقط
+        ma7_rising = curr['MA7'] > prev['MA7']
 
         if cross_up or ma7_rising:
             return {
@@ -94,7 +100,7 @@ class BinanceScanner:
                 df = self.get_data(symbol)
                 if df is None:
                     continue
-                
+
                 sig = self.check_signal(symbol, df)
                 if sig:
                     msg = (
