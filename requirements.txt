@@ -11,3 +11,5 @@ pyTelegramBotAPI
 pandas
 ccxt
 schedule
+pandas
+requests
