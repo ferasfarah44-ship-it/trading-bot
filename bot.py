@@ -3,7 +3,7 @@ import time
 import requests
 import pandas as pd
 
-print("🚀 BOT STARTED SUCCESSFULLY")
+print("🚀 BOT STARTED - 2% CANDLE MODE")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -19,22 +19,21 @@ def send_telegram(text):
     except Exception as e:
         print("Telegram Error:", e)
 
-def get_data(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=50"
+def get_last_candle(symbol):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=2"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
-
-        if isinstance(data, list) and len(data) > 10:
-            df = pd.DataFrame(data).iloc[:, :6]
-            df.columns = ['time','open','high','low','close','vol']
-            df['close'] = pd.to_numeric(df['close'])
-            return df
+        if isinstance(data, list) and len(data) >= 1:
+            last = data[-1]
+            open_price = float(last[1])
+            close_price = float(last[4])
+            return open_price, close_price
     except:
         return None
 
 def run():
-    send_telegram("🤖 Bot is running (MA7 rising only)")
+    send_telegram("📡 Bot running - catching 2% 15m candles")
 
     while True:
         try:
@@ -45,19 +44,21 @@ def run():
                 symbols = [t['symbol'] for t in tickers if t['symbol'].endswith("USDT")]
 
                 for s in symbols:
-                    df = get_data(s)
-                    if df is None:
+                    candle = get_last_candle(s)
+                    if candle is None:
                         continue
 
-                    df['MA7'] = df['close'].rolling(7).mean()
+                    open_price, close_price = candle
+                    change_percent = ((close_price - open_price) / open_price) * 100
 
-                    curr = df['MA7'].iloc[-1]
-                    prev = df['MA7'].iloc[-2]
-
-                    # 🔥 الشرط الوحيد: أي ارتفاع للأصفر
-                    if curr > prev:
-                        price = df['close'].iloc[-1]
-                        msg = f"📈 MA7 Rising\n{ s }\nPrice: { price }"
+                    # 🔥 الشرط الجديد: 2% صعود خلال 15 دقيقة
+                    if change_percent >= 2:
+                        msg = (
+                            f"🚀 Strong 15m Move\n"
+                            f"{s}\n"
+                            f"Change: {change_percent:.2f}%\n"
+                            f"Price: {close_price}"
+                        )
                         send_telegram(msg)
                         time.sleep(0.3)
 
