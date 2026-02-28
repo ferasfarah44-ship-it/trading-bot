@@ -2,7 +2,7 @@ import os
 import time
 import requests
 
-print("🚀 BOT STARTED - 2% 15m MODE - 1min scan")
+print("🚀 BOT STARTED - 0.5% 15m MODE - 1min scan")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -22,14 +22,13 @@ def send_telegram(text):
         print("Telegram Error:", e)
 
 def get_last_closed_candle(symbol):
-    # نجيب آخر شمعتين ونأخذ الثانية (المغلقة)
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=2"
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
         
         if isinstance(data, list) and len(data) >= 2:
-            closed = data[-2]  # الشمعة المغلقة
+            closed = data[-2]  # آخر شمعة مغلقة
             open_price = float(closed[1])
             close_price = float(closed[4])
             return open_price, close_price
@@ -37,7 +36,7 @@ def get_last_closed_candle(symbol):
         return None
 
 def run():
-    send_telegram("📡 Bot running - scanning every 1 minute")
+    send_telegram("📡 Bot running - 0.5% closed 15m candle")
 
     while True:
         try:
@@ -55,10 +54,10 @@ def run():
                     open_price, close_price = candle
                     change_percent = ((close_price - open_price) / open_price) * 100
 
-                    # 🔥 شرط 2% صعود في شمعة 15 دقيقة مغلقة
-                    if change_percent >= 2:
+                    # 🔥 الشرط الجديد 0.5%
+                    if change_percent >= 0.5:
                         msg = (
-                            f"🚀 15m Breakout\n"
+                            f"🚀 15m Move Detected\n"
                             f"{s}\n"
                             f"Change: {change_percent:.2f}%\n"
                             f"Close: {close_price}"
@@ -67,7 +66,7 @@ def run():
                         time.sleep(0.3)
 
             print("Cycle done")
-            time.sleep(60)  # ✅ فحص كل دقيقة
+            time.sleep(60)
 
         except Exception as e:
             print("Loop Error:", e)
