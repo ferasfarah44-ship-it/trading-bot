@@ -2,7 +2,7 @@ import os
 import time
 import requests
 
-print("🚀 BOT STARTED - 0.5% 15m MODE - 1min scan")
+print("🚀 BOT STARTED - 0.5% 15m MODE (Top 120 pairs)")
 
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -26,7 +26,6 @@ def get_last_closed_candle(symbol):
     try:
         r = requests.get(url, timeout=10)
         data = r.json()
-        
         if isinstance(data, list) and len(data) >= 2:
             closed = data[-2]  # آخر شمعة مغلقة
             open_price = float(closed[1])
@@ -36,34 +35,48 @@ def get_last_closed_candle(symbol):
         return None
 
 def run():
-    send_telegram("📡 Bot running - 0.5% closed 15m candle")
+    send_telegram("📡 Bot running - 0.5% 15m closed candle")
 
     while True:
         try:
-            r = requests.get("https://api.binance.com/api/v3/ticker/price")
-            tickers = r.json()
+            # نجيب بيانات 24hr لكل الأزواج مرة واحدة
+            r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
+            data = r.json()
 
-            if isinstance(tickers, list):
-                symbols = [t['symbol'] for t in tickers if t['symbol'].endswith("USDT")]
+            if not isinstance(data, list):
+                print("Binance error response")
+                time.sleep(60)
+                continue
 
-                for s in symbols:
-                    candle = get_last_closed_candle(s)
-                    if candle is None:
-                        continue
+            # فلترة USDT فقط
+            usdt_pairs = [x for x in data if x['symbol'].endswith("USDT")]
 
-                    open_price, close_price = candle
-                    change_percent = ((close_price - open_price) / open_price) * 100
+            # ترتيب حسب أعلى حجم تداول
+            usdt_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
 
-                    # 🔥 الشرط الجديد 0.5%
-                    if change_percent >= 0.5:
-                        msg = (
-                            f"🚀 15m Move Detected\n"
-                            f"{s}\n"
-                            f"Change: {change_percent:.2f}%\n"
-                            f"Close: {close_price}"
-                        )
-                        send_telegram(msg)
-                        time.sleep(0.3)
+            # نأخذ أعلى 120 فقط لتجنب Rate Limit
+            top_pairs = usdt_pairs[:120]
+
+            for coin in top_pairs:
+                s = coin['symbol']
+
+                candle = get_last_closed_candle(s)
+                if candle is None:
+                    continue
+
+                open_price, close_price = candle
+                change_percent = ((close_price - open_price) / open_price) * 100
+
+                # 🔥 الشرط نفسه 0.5%
+                if change_percent >= 0.5:
+                    msg = (
+                        f"🚀 15m Closed Move\n"
+                        f"{s}\n"
+                        f"Change: {change_percent:.2f}%\n"
+                        f"Close: {close_price}"
+                    )
+                    send_telegram(msg)
+                    time.sleep(0.2)
 
             print("Cycle done")
             time.sleep(60)
