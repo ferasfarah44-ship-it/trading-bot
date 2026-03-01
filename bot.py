@@ -1,73 +1,70 @@
-import os
-import time
 import requests
+import pandas as pd
+import time
 
-print("🚀 BOT STARTED - REAL 15m CHECK")
+TELEGRAM_TOKEN = "PUT_YOUR_BOT_TOKEN"
+CHAT_ID = "PUT_YOUR_CHAT_ID"
 
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+symbols = ["SOLUSDT","ETHUSDT","ARBUSDT","OPUSDT","NEARUSDT","LINKUSDT"]
+interval = "4h"
 
-def send_telegram(text):
-    if not TOKEN or not CHAT_ID:
-        print("Missing Telegram variables")
-        return
-    
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    requests.post(url, json={"chat_id": CHAT_ID, "text": text})
+sent_signals = set()
 
-def get_closed_candle(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=2"
-    r = requests.get(url, timeout=10)
-    data = r.json()
+def send_telegram(message):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    requests.post(url, data={"chat_id": CHAT_ID, "text": message})
 
-    if not isinstance(data, list) or len(data) < 2:
-        return None
+def get_klines(symbol):
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=200"
+    data = requests.get(url).json()
+    df = pd.DataFrame(data)
+    df = df.iloc[:,0:6]
+    df.columns = ["time","open","high","low","close","volume"]
+    df["close"] = df["close"].astype(float)
+    df["low"] = df["low"].astype(float)
+    df["high"] = df["high"].astype(float)
+    return df
 
-    last = data[-1]
+def analyze(symbol):
+    df = get_klines(symbol)
 
-    # وقت إغلاق الشمعة
-    close_time = last[6] / 1000
-    current_time = time.time()
+    df["MA7"] = df["close"].rolling(7).mean()
+    df["MA25"] = df["close"].rolling(25).mean()
+    df["MA100"] = df["close"].rolling(100).mean()
+    df["MA200"] = df["close"].rolling(200).mean()
 
-    # إذا انتهت فعلاً
-    if current_time >= close_time:
-        open_price = float(last[1])
-        close_price = float(last[4])
-        return open_price, close_price
+    last = df.iloc[-1]
+    support = df["low"].rolling(10).min().iloc[-1]
 
-    return None
+    trend = (
+        last["close"] > last["MA100"] and
+        last["close"] > last["MA200"] and
+        last["MA7"] > last["MA25"]
+    )
 
-def run():
-    send_telegram("Bot running - real closed 15m candles")
+    near_support = abs(last["close"] - support) / support < 0.02
 
-    while True:
+    target = last["close"] * 1.03
+    space = (target - last["close"]) / last["close"] >= 0.03
+
+    if trend and near_support and space:
+        if symbol not in sent_signals:
+            message = f"""
+🚀 فرصة 24 ساعة
+
+العملة: {symbol}
+السعر الحالي: {last['close']:.2f}
+سعر الدخول: {last['close']:.2f}
+الهدف: {target:.2f}
+الربح المتوقع: 3%
+            """
+            send_telegram(message)
+            sent_signals.add(symbol)
+
+while True:
+    for s in symbols:
         try:
-            r = requests.get("https://api.binance.com/api/v3/ticker/24hr", timeout=15)
-            data = r.json()
-
-            usdt_pairs = [x for x in data if x['symbol'].endswith("USDT")]
-            usdt_pairs = sorted(usdt_pairs, key=lambda x: float(x['quoteVolume']), reverse=True)
-            top_pairs = usdt_pairs[:100]
-
-            for coin in top_pairs:
-                s = coin['symbol']
-                candle = get_closed_candle(s)
-                if candle is None:
-                    continue
-
-                open_price, close_price = candle
-                change = ((close_price - open_price) / open_price) * 100
-
-                if change >= 0.5:
-                    send_telegram(f"🚀 {s} +{change:.2f}% (15m closed)")
-                    time.sleep(0.2)
-
-            print("Cycle done")
-            time.sleep(60)
-
-        except Exception as e:
-            print("Error:", e)
-            time.sleep(30)
-
-if __name__ == "__main__":
-    run()
+            analyze(s)
+        except:
+            pass
+    time.sleep(300)
