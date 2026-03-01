@@ -1,5 +1,4 @@
 import requests
-import pandas as pd
 import time
 
 TELEGRAM_TOKEN = "PUT_YOUR_BOT_TOKEN"
@@ -8,58 +7,64 @@ CHAT_ID = "PUT_YOUR_CHAT_ID"
 symbols = ["SOLUSDT","ETHUSDT","ARBUSDT","OPUSDT","NEARUSDT","LINKUSDT"]
 interval = "4h"
 
-sent_signals = set()
+sent = set()
 
-def send_telegram(message):
+def send_telegram(msg):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    requests.post(url, data={"chat_id": CHAT_ID, "text": message})
+    requests.post(url, data={"chat_id": CHAT_ID, "text": msg})
 
 def get_klines(symbol):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit=200"
     data = requests.get(url).json()
-    df = pd.DataFrame(data)
-    df = df.iloc[:,0:6]
-    df.columns = ["time","open","high","low","close","volume"]
-    df["close"] = df["close"].astype(float)
-    df["low"] = df["low"].astype(float)
-    df["high"] = df["high"].astype(float)
-    return df
+    return data
+
+def moving_average(data, period):
+    closes = [float(x[4]) for x in data]
+    if len(closes) < period:
+        return None
+    return sum(closes[-period:]) / period
 
 def analyze(symbol):
-    df = get_klines(symbol)
+    data = get_klines(symbol)
+    closes = [float(x[4]) for x in data]
+    lows = [float(x[3]) for x in data]
 
-    df["MA7"] = df["close"].rolling(7).mean()
-    df["MA25"] = df["close"].rolling(25).mean()
-    df["MA100"] = df["close"].rolling(100).mean()
-    df["MA200"] = df["close"].rolling(200).mean()
+    current_price = closes[-1]
 
-    last = df.iloc[-1]
-    support = df["low"].rolling(10).min().iloc[-1]
+    ma7 = moving_average(data, 7)
+    ma25 = moving_average(data, 25)
+    ma100 = moving_average(data, 100)
+    ma200 = moving_average(data, 200)
+
+    if None in [ma7, ma25, ma100, ma200]:
+        return
+
+    support = min(lows[-10:])
 
     trend = (
-        last["close"] > last["MA100"] and
-        last["close"] > last["MA200"] and
-        last["MA7"] > last["MA25"]
+        current_price > ma100 and
+        current_price > ma200 and
+        ma7 > ma25
     )
 
-    near_support = abs(last["close"] - support) / support < 0.02
+    near_support = abs(current_price - support) / support < 0.02
 
-    target = last["close"] * 1.03
-    space = (target - last["close"]) / last["close"] >= 0.03
+    target = current_price * 1.03
+    percent = ((target - current_price) / current_price) * 100
 
-    if trend and near_support and space:
-        if symbol not in sent_signals:
-            message = f"""
+    if trend and near_support:
+        if symbol not in sent:
+            msg = f"""
 🚀 فرصة 24 ساعة
 
 العملة: {symbol}
-السعر الحالي: {last['close']:.2f}
-سعر الدخول: {last['close']:.2f}
+السعر الحالي: {current_price:.2f}
+الدخول: {current_price:.2f}
 الهدف: {target:.2f}
-الربح المتوقع: 3%
+نسبة الربح: {percent:.2f}%
             """
-            send_telegram(message)
-            sent_signals.add(symbol)
+            send_telegram(msg)
+            sent.add(symbol)
 
 while True:
     for s in symbols:
