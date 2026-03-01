@@ -1,5 +1,10 @@
-print("HELLO FROM RAILWAY")
-
 import time
+import sys
+
+print("🚀 BOT STARTED")
+sys.stdout.flush()
+
 while True:
-    time.sleep(10)
+    print("✅ BOT STILL RUNNING")
+    sys.stdout.flush()
+    time.sleep(60)
