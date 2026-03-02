@@ -1,248 +1,92 @@
 import os
 import time
-import logging
 import asyncio
-from datetime import datetime
+import requests
 import pandas as pd
-import ccxt.async_support as ccxt
+import pandas_ta as ta
 from telegram import Bot
-from dotenv import load_dotenv
-from ta.momentum import RSIIndicator, StochasticOscillator
-from ta.trend import SMAIndicator, EMAIndicator, MACD
-from ta.volatility import BollingerBands
 
-# ==============================
-# LOAD ENV
-# ==============================
-load_dotenv()
+# إعدادات تليجرام فقط (يتم وضعها في Railway Variables)
+TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_ID = os.getenv('CHAT_ID')
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", 300))
+bot = Bot(token=TELEGRAM_TOKEN)
 
-TRADING_PAIRS = ['SOL/USDT', 'ETH/USDT', 'ARB/USDT', 'OP/USDT', 'NEAR/USDT', 'XPR/USDT']
+# العملات المطلوبة (مقابل USDT)
+SYMBOLS = ['SOLUSDT', 'ETHUSDT', 'OPUSDT', 'NEARUSDT', 'ARBUSDT', 'AVAXUSDT', 'LINKUSDT', 'XRPUSDT']
 
-# ==============================
-# LOGGING (مضمون يطبع)
-# ==============================
-logging.basicConfig(
-    level=logging.DEBUG,
-    format="%(asctime)s - %(levelname)s - %(message)s",
-    force=True
-)
-logger = logging.getLogger()
-
-# ==============================
-# BOT CLASS
-# ==============================
-class TradingSignalBot:
-
-    def __init__(self):
-
-        if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-            raise ValueError("❌ Telegram credentials missing in .env")
-
-        self.exchange = ccxt.binance({
-            "enableRateLimit": True,
-            "timeout": 20000,
-            "options": {"defaultType": "spot"}
-        })
-
-        self.bot = Bot(token=TELEGRAM_BOT_TOKEN)
-        self.last_signals = {}
-
-        logger.info("✅ Bot initialized")
-
-    async def fetch_ohlcv(self, symbol):
-        try:
-            logger.debug(f"Fetching {symbol}")
-            ohlcv = await self.exchange.fetch_ohlcv(symbol, "1h", limit=100)
-            df = pd.DataFrame(
-                ohlcv,
-                columns=["timestamp", "open", "high", "low", "close", "volume"]
-            )
-            df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            return df
-        except Exception as e:
-            logger.error(f"❌ Fetch error {symbol}: {e}")
-            return None
-
-    def calculate_indicators(self, df):
-
-        df["rsi"] = RSIIndicator(close=df["close"], window=14).rsi()
-
-        macd = MACD(close=df["close"])
-        df["macd"] = macd.macd()
-        df["macd_signal"] = macd.macd_signal()
-
-        df["sma_20"] = SMAIndicator(close=df["close"], window=20).sma_indicator()
-        df["sma_50"] = SMAIndicator(close=df["close"], window=50).sma_indicator()
-        df["ema_12"] = EMAIndicator(close=df["close"], window=12).ema_indicator()
-        df["ema_26"] = EMAIndicator(close=df["close"], window=26).ema_indicator()
-
-        bb = BollingerBands(close=df["close"])
-        df["bb_high"] = bb.bollinger_hband()
-        df["bb_low"] = bb.bollinger_lband()
-
-        stoch = StochasticOscillator(
-            high=df["high"],
-            low=df["low"],
-            close=df["close"]
-        )
-        df["stoch_k"] = stoch.stoch()
-
-        return df
-
-    def analyze_signal(self, df, symbol):
-
-        if df is None or len(df) < 50:
-            return None
-
-        current = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        buy = 0
-        sell = 0
-
-        # RSI
-        if current["rsi"] < 30:
-            buy += 2
-        elif current["rsi"] > 70:
-            sell += 2
-        elif 40 < current["rsi"] < 60 and prev["rsi"] < 40:
-            buy += 1
-
-        # MACD
-        if current["macd"] > current["macd_signal"] and prev["macd"] <= prev["macd_signal"]:
-            buy += 2
-        elif current["macd"] < current["macd_signal"] and prev["macd"] >= prev["macd_signal"]:
-            sell += 2
-
-        # MA
-        if current["close"] > current["sma_20"] > current["sma_50"]:
-            buy += 1
-        elif current["close"] < current["sma_20"] < current["sma_50"]:
-            sell += 1
-
-        # EMA
-        if current["ema_12"] > current["ema_26"] and prev["ema_12"] <= prev["ema_26"]:
-            buy += 2
-
-        # BB
-        if current["close"] < current["bb_low"]:
-            buy += 1
-        elif current["close"] > current["bb_high"]:
-            sell += 1
-
-        # STOCH
-        if current["stoch_k"] < 20 and current["stoch_k"] > prev["stoch_k"]:
-            buy += 1
-        elif current["stoch_k"] > 80:
-            sell += 1
-
-        signal = None
-        if buy >= 3:
-            signal = "BUY"
-        elif sell >= 3:
-            signal = "SELL"
-
-        if not signal:
-            return None
-
-        price = current["close"]
-
-        return {
-            "symbol": symbol,
-            "signal": signal,
-            "price": price,
-            "sl": price * (0.95 if signal == "BUY" else 1.05),
-            "tp1": price * (1.03 if signal == "BUY" else 0.97),
-            "tp2": price * (1.06 if signal == "BUY" else 0.94),
-            "tp3": price * (1.10 if signal == "BUY" else 0.90),
-        }
-
-    async def send_signal(self, data):
-
-        try:
-            msg = f"""
-🚨 SIGNAL
-
-Pair: {data['symbol']}
-Type: {data['signal']}
-Price: {data['price']:.4f}
-
-SL: {data['sl']:.4f}
-TP1: {data['tp1']:.4f}
-TP2: {data['tp2']:.4f}
-TP3: {data['tp3']:.4f}
-
-Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}
-"""
-
-            await self.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text=msg
-            )
-
-            logger.info(f"✅ Sent {data['symbol']} {data['signal']}")
-
-        except Exception as e:
-            logger.error(f"❌ Telegram error: {e}")
-
-    async def check_pair(self, symbol):
-
-        df = await self.fetch_ohlcv(symbol)
-        if df is None:
-            return
-
-        df = self.calculate_indicators(df)
-        signal = self.analyze_signal(df, symbol)
-
-        if not signal:
-            logger.debug(f"No signal {symbol}")
-            return
-
-        last = self.last_signals.get(symbol)
-        if last and (datetime.now() - last).total_seconds() < 3600:
-            return
-
-        await self.send_signal(signal)
-        self.last_signals[symbol] = datetime.now()
-
-    async def run(self):
-
-        logger.info("🚀 Bot started")
-
-        try:
-            await self.bot.send_message(
-                chat_id=TELEGRAM_CHAT_ID,
-                text="🤖 Bot Started Successfully"
-            )
-        except Exception as e:
-            logger.error(f"Startup Telegram error: {e}")
-
-        while True:
-            try:
-                tasks = [self.check_pair(p) for p in TRADING_PAIRS]
-                await asyncio.gather(*tasks)
-                await asyncio.sleep(CHECK_INTERVAL)
-            except Exception as e:
-                logger.error(f"Main loop error: {e}")
-                await asyncio.sleep(60)
-
-    async def stop(self):
-        await self.exchange.close()
-        logger.info("Bot stopped")
-
-# ==============================
-# MAIN
-# ==============================
-async def main():
-    bot = TradingSignalBot()
+async def send_msg(text):
     try:
-        await bot.run()
-    finally:
-        await bot.stop()
+        await bot.send_message(chat_id=CHAT_ID, text=text, parse_mode='Markdown')
+    except Exception as e:
+        print(f"Telegram Error: {e}")
+
+def get_public_data(symbol):
+    """جلب بيانات الشموع من بايننس بدون API Key"""
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=100"
+    response = requests.get(url)
+    data = response.json()
+    
+    df = pd.DataFrame(data, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'])
+    df['close'] = df['close'].astype(float)
+    return df
+
+def analyze_market(symbol):
+    try:
+        df = get_public_data(symbol)
+        
+        # مؤشر القوة النسبية (RSI) - لمعرفة قوة الزخم
+        df['RSI'] = ta.rsi(df['close'], length=14)
+        
+        # المتوسطات المتحركة (SMA)
+        df['MA7'] = ta.sma(df['close'], length=7)
+        df['MA25'] = ta.sma(df['close'], length=25)
+        
+        cp = df['close'].iloc[-1]  # السعر الحالي
+        rsi = df['RSI'].iloc[-1]
+        ma7 = df['MA7'].iloc[-1]
+        ma25 = df['MA25'].iloc[-1]
+        
+        # شروط الدخول "المطمئنة" (اتجاه صاعد + زخم شراء)
+        if cp > ma7 and ma7 > ma25 and rsi > 55:
+            target1 = cp * 1.03  # +3%
+            target2 = cp * 1.06  # +6%
+            return {
+                "price": cp,
+                "rsi": rsi,
+                "t1": target1,
+                "t2": target2
+            }
+    except Exception as e:
+        print(f"Error analyzing {symbol}: {e}")
+    return None
+
+async def main_loop():
+    await send_msg("🚀 **تم تشغيل رادار العملات بنجاح**\nالبوت يحلل الآن بدون مفاتيح API.")
+    last_health_check = time.time()
+
+    while True:
+        try:
+            for symbol in SYMBOLS:
+                signal = analyze_market(symbol)
+                if signal:
+                    msg = (f"📈 **إشارة صعود قوية: {symbol}**\n"
+                           f"💰 السعر الحالي: `{signal['price']:.4f}`\n"
+                           f"🔥 قوة الزخم (RSI): `{signal['rsi']:.2f}`\n\n"
+                           f"🎯 هدف أول (+3%): `{signal['t1']:.4f}`\n"
+                           f"🎯 هدف ثاني (+6%): `{signal['t2']:.4f}`\n"
+                           f"🚀 الحالة: اتجاه صاعد مؤكد")
+                    await send_msg(msg)
+                
+            # رسالة التأكد كل ساعة
+            if time.time() - last_health_check > 3600:
+                await send_msg("✅ **تحديث الساعة:** البوت يعمل ويحلل السوق حالياً.")
+                last_health_check = time.time()
+            
+            await asyncio.sleep(60) # فحص السوق كل دقيقة
+        except Exception as e:
+            print(f"Loop Error: {e}")
+            await asyncio.sleep(30)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(main_loop())
