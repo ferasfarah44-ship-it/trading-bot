@@ -1,12 +1,1 @@
-pandas
-numpy
 requests
-python-binance
-pyTelegramBotAPI
-ccxt
-schedule
-python-dotenv
-pyTelegramBotAPI
-schedule
-pandas_ta
-python-telegram-bot
