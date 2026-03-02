@@ -13,3 +13,7 @@ ccxt
 schedule
 pandas
 requests
+requests
+pandas
+pandas_ta
+python-telegram-bot
