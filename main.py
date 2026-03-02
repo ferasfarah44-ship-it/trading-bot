@@ -1,1 +1,2 @@
-print("TEST 123")
+print("BOT STARTED...")
+print("Running main file")
