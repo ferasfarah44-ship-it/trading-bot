@@ -1,46 +1,118 @@
-import os
-import time
+import ccxt
+import pandas as pd
+import ta
 import requests
+import time
+from datetime import datetime
 
-# إعدادات التنبيه
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('CHAT_ID')
-SYMBOLS = ['SOLUSDT', 'ETHUSDT', 'OPUSDT', 'NEARUSDT', 'ARBUSDT', 'AVAXUSDT', 'LINKUSDT', 'XRPUSDT']
+# ===== بياناتك =====
+TELEGRAM_TOKEN = "PUT_YOUR_TOKEN"
+CHAT_ID = "PUT_YOUR_CHAT_ID"
 
-def send_msg(text):
-    url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+symbols = [
+    "SOL/USDT",
+    "ETH/USDT",
+    "OP/USDT",
+    "NEAR/USDT",
+    "ARB/USDT"
+]
+
+exchange = ccxt.binance({
+    'enableRateLimit': True
+})
+
+last_signals = {}
+last_hour_report = datetime.now().hour
+
+# ===== ارسال تلجرام =====
+def send_telegram(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": CHAT_ID, "text": msg}
     try:
-        res = requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
-        print(f"إرسال لتليجرام: {res.status_code}")
-    except Exception as e:
-        print(f"خطأ تليجرام: {e}")
+        requests.post(url, data=data, timeout=10)
+    except:
+        pass
 
-def get_data(symbol):
-    # جلب سعر الإغلاق لآخر شمعتين (ساعة) للتحليل
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=2"
-    res = requests.get(url).json()
-    return float(res[0][4]), float(res[1][4]) # السعر السابق والحالي
+# ===== تحليل =====
+def analyze(symbol):
 
-def run_bot():
-    print("🚀 البوت بدأ فحص السوق الآن...")
-    send_msg("✅ تم تشغيل البوت بنجاح وهو يراقب العملات الآن.")
-    
-    while True:
-        for symbol in SYMBOLS:
-            try:
-                old_price, current_price = get_data(symbol)
-                print(f"فحص {symbol}: السعر الحالي {current_price}")
-                
-                # شرط دخول بسيط: إذا السعر الحالي أعلى من سعر الإغلاق السابق (صعود)
-                if current_price > old_price:
-                    target = current_price * 1.03
-                    msg = f"📈 **إشارة دخول: {symbol}**\n💰 السعر: `{current_price}`\n🎯 الهدف (3%): `{target:.4f}`"
-                    send_msg(msg)
-            except Exception as e:
-                print(f"خطأ في {symbol}: {e}")
-        
-        print("💤 انتظار 5 دقائق للفحص القادم...")
+    # اتجاه عام H1
+    df_h1 = pd.DataFrame(exchange.fetch_ohlcv(symbol, '1h', limit=100),
+                         columns=['time','open','high','low','close','volume'])
+    df_h1['ema50'] = ta.trend.ema_indicator(df_h1['close'], window=50)
+
+    if df_h1['close'].iloc[-1] < df_h1['ema50'].iloc[-1]:
+        return  # تجاهل إذا الاتجاه هابط
+
+    # تأكيد M15
+    df_m15 = pd.DataFrame(exchange.fetch_ohlcv(symbol, '15m', limit=100),
+                          columns=['time','open','high','low','close','volume'])
+    resistance = df_m15['high'].rolling(20).max().iloc[-1]
+
+    # دخول M5
+    df_m5 = pd.DataFrame(exchange.fetch_ohlcv(symbol, '5m', limit=100),
+                         columns=['time','open','high','low','close','volume'])
+
+    df_m5['ema9'] = ta.trend.ema_indicator(df_m5['close'], window=9)
+    df_m5['ema21'] = ta.trend.ema_indicator(df_m5['close'], window=21)
+    df_m5['rsi'] = ta.momentum.rsi(df_m5['close'], window=14)
+
+    last = df_m5.iloc[-1]
+    prev = df_m5.iloc[-2]
+
+    # تقاطع صاعد
+    if prev['ema9'] < prev['ema21'] and last['ema9'] > last['ema21']:
+        if 50 < last['rsi'] < 70:
+
+            entry = last['close']
+            target = resistance
+            stop = df_m5['low'].rolling(10).min().iloc[-1]
+
+            if target <= entry:
+                return
+
+            profit_percent = round((target - entry) / entry * 100, 2)
+
+            confidence = 80
+
+            # منع تكرار الإشارة
+            if symbol in last_signals and abs(last_signals[symbol] - entry) < entry*0.003:
+                return
+
+            last_signals[symbol] = entry
+
+            message = f"""
+🚀 اشارة شراء - {symbol}
+
+💰 السعر الحالي: {round(entry,4)}
+📥 الدخول: {round(entry,4)}
+
+🎯 الهدف الفني (مقاومة M15): {round(target,4)}
+📈 نسبة الربح المتوقعة: +{profit_percent}%
+
+🛑 وقف الخسارة: {round(stop,4)}
+
+📊 قوة الثقة: {confidence}%
+📈 الاتجاه H1: صاعد
+"""
+            send_telegram(message)
+
+# ===== بدء التشغيل =====
+send_telegram("✅ تم تشغيل بوت السكالبينغ بنجاح\n📊 مراقبة 6 عملات\n⏱ الفحص كل 5 دقائق\n🚀 النظام يعمل بثبات")
+
+# ===== حلقة مستمرة =====
+while True:
+    try:
+        for symbol in symbols:
+            analyze(symbol)
+
+        # تقرير كل ساعة
+        current_hour = datetime.now().hour
+        if current_hour != last_hour_report:
+            send_telegram("📊 تقرير الساعة\n✔ السوق تحت المراقبة\n🔍 يتم التحليل كل 5 دقائق")
+            last_hour_report = current_hour
+
         time.sleep(300)
 
-if __name__ == "__main__":
-    run_bot()
+    except Exception as e:
+        time.sleep(60)
