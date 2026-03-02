@@ -3,17 +3,10 @@ numpy
 requests
 python-binance
 pyTelegramBotAPI
-pandas
 ccxt
 schedule
 python-dotenv
 pyTelegramBotAPI
-pandas
-ccxt
 schedule
-pandas
-requests
-requests
-pandas
 pandas_ta
 python-telegram-bot
