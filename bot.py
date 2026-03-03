@@ -1,55 +1,98 @@
-import time
+import os
+import telebot
 import requests
-import pandas as pd
-import pandas_ta as ta
+import threading
+import time
 
-# --- ضع بياناتك هنا ---
-TELEGRAM_TOKEN = "7864353229:AAGF1r8N..." # ضع التوكن بالكامل هنا
-CHAT_ID = "634814..." # ضع الآيدي هنا
-# ----------------------
+TOKEN = os.getenv("BOT_TOKEN")
 
-SYMBOLS = ['SOLUSDT', 'ETHUSDT', 'OPUSDT', 'NEARUSDT', 'ARBUSDT', 'AVAXUSDT', 'LINKUSDT', 'XRPUSDT']
+if not TOKEN:
+    raise ValueError("BOT_TOKEN is missing")
 
-def send_msg(text):
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+bot = telebot.TeleBot(TOKEN)
+print("✅ BOT STARTED")
+
+CHAT_ID = None
+
+
+# =========================
+# START
+# =========================
+@bot.message_handler(commands=['start'])
+def start_message(message):
+    global CHAT_ID
+    CHAT_ID = message.chat.id
+    bot.reply_to(message, "🚀 البوت شغال يا فراس!")
+
+
+# =========================
+# جلب السعر من Binance مع حماية
+# =========================
+def get_binance_price():
+    url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+    headers = {"User-Agent": "Mozilla/5.0"}
+
+    r = requests.get(url, headers=headers, timeout=10)
+
+    if r.status_code != 200:
+        return None
+
+    data = r.json()
+
+    if "price" not in data:
+        return None
+
+    return float(data["price"])
+
+
+# =========================
+# Fallback من CoinGecko
+# =========================
+def get_backup_price():
+    url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
+    r = requests.get(url, timeout=10)
+    data = r.json()
+    return float(data["bitcoin"]["usd"])
+
+
+# =========================
+# أمر /price
+# =========================
+@bot.message_handler(commands=['price'])
+def price_command(message):
     try:
-        requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"})
-    except:
-        print("تعذر إرسال تليجرام")
+        price = get_binance_price()
 
-def analyze():
-    print(f"\n--- فحص: {time.strftime('%H:%M:%S')} ---")
-    for symbol in SYMBOLS:
-        try:
-            url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=50"
-            res = requests.get(url).json()
-            df = pd.DataFrame(res, columns=['time', 'open', 'high', 'low', 'close', 'vol', 'close_time', 'qav', 'num_trades', 'taker_base', 'taker_quote', 'ignore'])
-            df['close'] = df['close'].astype(float)
-            
-            # المؤشرات
-            df['EMA7'] = ta.ema(df['close'], length=7)
-            df['EMA25'] = ta.ema(df['close'], length=25)
-            df['RSI'] = ta.rsi(df['close'], length=14)
-            
-            cp = df['close'].iloc[-1]
-            e7 = df['EMA7'].iloc[-1]
-            e25 = df['EMA25'].iloc[-1]
-            rsi = df['RSI'].iloc[-1]
+        if price:
+            bot.reply_to(message, f"💰 سعر BTC الحالي: {price} USDT")
+        else:
+            backup = get_backup_price()
+            bot.reply_to(message, f"⚠️ Binance غير متاح\n💰 السعر البديل: {backup} USD")
 
-            print(f"[{symbol}] السعر: {cp} | RSI: {rsi:.2f}")
+    except Exception as e:
+        bot.reply_to(message, "⚠️ خطأ في جلب البيانات")
 
-            # شرط الدخول الذهبي: تقاطع EMA7 فوق EMA25 + RSI فوق 50
-            if cp > e7 and e7 > e25 and rsi > 50:
-                msg = (f"🚀 **إشارة دخول: {symbol}**\n"
-                       f"💰 السعر: `{cp}`\n"
-                       f"🔥 القوة: `{rsi:.2f}`\n"
-                       f"🎯 هدف (3%): `{cp*1.03:.4f}`")
-                send_msg(msg)
-        except Exception as e:
-            print(f"خطأ في {symbol}: {e}")
 
-# بداية التشغيل
-send_msg("🤖 البوت بدأ العمل على Pydroid بنجاح!")
-while True:
-    analyze()
-    time.sleep(300) # فحص كل 5 دقائق
+# =========================
+# رسالة كل ساعة
+# =========================
+def hourly_check():
+    global CHAT_ID
+    while True:
+        if CHAT_ID:
+            try:
+                bot.send_message(CHAT_ID, "✅ البوت يعمل بشكل طبيعي")
+            except:
+                pass
+        time.sleep(3600)
+
+
+threading.Thread(target=hourly_check, daemon=True).start()
+
+
+# =========================
+# تشغيل نظيف بدون 409
+# =========================
+bot.remove_webhook()
+time.sleep(1)
+bot.infinity_polling(skip_pending=True)
