@@ -16,11 +16,11 @@ bot = telebot.TeleBot(TOKEN)
 
 print("✅ BOT STARTED SUCCESSFULLY")
 
-# =========================
-# حفظ chat_id أول شخص يكتب
-# =========================
 CHAT_ID = None
 
+# =========================
+# عند /start
+# =========================
 @bot.message_handler(commands=['start'])
 def start_message(message):
     global CHAT_ID
@@ -28,22 +28,32 @@ def start_message(message):
     bot.reply_to(message, "🚀 البوت شغال يا فراس!")
 
 # =========================
-# أمر السعر
+# جلب السعر من Binance
 # =========================
 @bot.message_handler(commands=['price'])
 def get_price(message):
     try:
-        url = "https://api.coingecko.com/api/v3/simple/price?ids=bitcoin&vs_currencies=usd"
-        response = requests.get(url, timeout=10)
+        url = "https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT"
+
+        headers = {
+            "User-Agent": "Mozilla/5.0"
+        }
+
+        response = requests.get(url, headers=headers, timeout=10)
 
         if response.status_code != 200:
-            bot.reply_to(message, "⚠️ خطأ في جلب البيانات")
+            bot.reply_to(message, f"⚠️ Binance Error: {response.status_code}")
             return
 
         data = response.json()
-        price = data["bitcoin"]["usd"]
 
-        bot.reply_to(message, f"💰 سعر BTC الحالي: {price} USD")
+        if "price" not in data:
+            bot.reply_to(message, "⚠️ لم يتم العثور على السعر")
+            return
+
+        price = float(data["price"])
+
+        bot.reply_to(message, f"💰 سعر BTC الحالي: {price} USDT")
 
     except Exception as e:
         bot.reply_to(message, f"❌ خطأ: {str(e)}")
@@ -59,9 +69,8 @@ def hourly_check():
                 bot.send_message(CHAT_ID, "✅ البوت يعمل بشكل طبيعي")
             except:
                 pass
-        time.sleep(3600)  # كل ساعة
+        time.sleep(3600)
 
-# تشغيل الثريد
 threading.Thread(target=hourly_check, daemon=True).start()
 
 # =========================
