@@ -52,7 +52,6 @@ def get_price(message):
             return
 
         price = float(data["price"])
-
         bot.reply_to(message, f"💰 سعر BTC الحالي: {price} USDT")
 
     except Exception as e:
@@ -74,6 +73,8 @@ def hourly_check():
 threading.Thread(target=hourly_check, daemon=True).start()
 
 # =========================
-# تشغيل البوت
+# تشغيل البوت (حل مشكلة 409)
 # =========================
-bot.infinity_polling()
+bot.remove_webhook()
+time.sleep(1)
+bot.infinity_polling(skip_pending=True)
