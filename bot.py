@@ -1,39 +1,62 @@
-import telebot
 import requests
 import time
 import logging
+import os
 from datetime import datetime
 
-# ─── إعداد الـ Logging ───────────────────────────────────────────────────────
+# ─── Logging ─────────────────────────────────────────────────────────────────
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-# ─── إعداد التوكنات (من Environment Variables) ──────────────────────────────
-import os
+# ─── Environment Variables ────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
-
-bot = telebot.TeleBot(TELEGRAM_BOT_TOKEN)
 
 # ─── العملات ─────────────────────────────────────────────────────────────────
 SYMBOLS = [
     "SOLUSDT","LINKUSDT","ETHUSDT","XRPUSDT","NEARUSDT",
-    "ARBUSDT","OPUSDT",  "APTUSDT","AVAXUSDT","BTCUSDT"
+    "ARBUSDT","OPUSDT","APTUSDT","AVAXUSDT","BTCUSDT"
 ]
 
 TIMEFRAMES = {"scalp": "15m", "daily": "4h"}
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  جلب البيانات من Binance API مباشرة (بدون ccxt)
+#  إرسال رسالة — عبر requests مباشرة (بدون polling / بدون conflict)
+# ════════════════════════════════════════════════════════════════════════════════
+def send_msg(text: str):
+    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram credentials missing!")
+        return
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage",
+            json={
+                "chat_id": TELEGRAM_CHAT_ID,
+                "text": text,
+                "parse_mode": "HTML"
+            },
+            timeout=10
+        )
+        if r.status_code == 200:
+            logger.info("✅ Message sent")
+        else:
+            logger.error(f"Telegram error {r.status_code}: {r.text}")
+    except Exception as e:
+        logger.error(f"send_msg exception: {e}")
+
+# ════════════════════════════════════════════════════════════════════════════════
+#  جلب البيانات من Binance
 # ════════════════════════════════════════════════════════════════════════════════
 def fetch_klines(symbol: str, interval: str, limit: int = 200):
-    url = "https://api.binance.com/api/v3/klines"
-    params = {"symbol": symbol, "interval": interval, "limit": limit}
     try:
-        r = requests.get(url, params=params, timeout=10)
+        r = requests.get(
+            "https://api.binance.com/api/v3/klines",
+            params={"symbol": symbol, "interval": interval, "limit": limit},
+            timeout=10
+        )
         data = r.json()
         closes  = [float(x[4]) for x in data]
         highs   = [float(x[2]) for x in data]
@@ -41,21 +64,11 @@ def fetch_klines(symbol: str, interval: str, limit: int = 200):
         volumes = [float(x[5]) for x in data]
         return closes, highs, lows, volumes
     except Exception as e:
-        logger.error(f"fetch_klines error {symbol}: {e}")
+        logger.error(f"fetch_klines error {symbol} {interval}: {e}")
         return [], [], [], []
 
-def get_price(symbol: str) -> float:
-    try:
-        r = requests.get(
-            f"https://api.binance.com/api/v3/ticker/price",
-            params={"symbol": symbol}, timeout=5
-        )
-        return float(r.json()["price"])
-    except:
-        return 0.0
-
 # ════════════════════════════════════════════════════════════════════════════════
-#  المؤشرات الفنية (بدون pandas/numpy — حسابات مباشرة)
+#  المؤشرات الفنية
 # ════════════════════════════════════════════════════════════════════════════════
 def ema(data, period):
     k = 2 / (period + 1)
@@ -111,15 +124,17 @@ def atr(highs, lows, closes, period=14):
     return sum(trs[-period:]) / period
 
 def stochastic(highs, lows, closes, k_period=14):
-    if len(closes) < k_period:
+    if len(closes) < k_period + 1:
         return 50, 50
     lowest  = min(lows[-k_period:])
     highest = max(highs[-k_period:])
     if highest == lowest:
         return 50, 50
     k = 100 * (closes[-1] - lowest) / (highest - lowest)
-    k_prev = 100 * (closes[-2] - min(lows[-k_period-1:-1])) / \
-             (max(highs[-k_period-1:-1]) - min(lows[-k_period-1:-1]) or 1)
+    low_prev  = min(lows[-k_period-1:-1])
+    high_prev = max(highs[-k_period-1:-1])
+    rng_prev  = high_prev - low_prev or 1
+    k_prev    = 100 * (closes[-2] - low_prev) / rng_prev
     return k, k_prev
 
 # ════════════════════════════════════════════════════════════════════════════════
@@ -130,17 +145,17 @@ def analyze(symbol: str, interval: str, mode: str):
     if len(closes) < 50:
         return None
 
-    price    = closes[-1]
-    ema9_v   = ema(closes, 9)
-    ema21_v  = ema(closes, 21)
-    ema50_v  = ema(closes, 50)
-    rsi_val  = rsi(closes)
-    macd_h, macd_h_prev = macd_histogram(closes)
-    bb_up, bb_mid, bb_low = bollinger(closes)
-    atr_val  = atr(highs, lows, closes)
-    k_val, k_prev = stochastic(highs, lows, closes)
-    vol_avg  = sum(volumes[-20:]) / 20
-    vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 1
+    price             = closes[-1]
+    ema9_v            = ema(closes, 9)
+    ema21_v           = ema(closes, 21)
+    ema50_v           = ema(closes, 50)
+    rsi_val           = rsi(closes)
+    macd_h, macd_prev = macd_histogram(closes)
+    bb_up, _, bb_low  = bollinger(closes)
+    atr_val           = atr(highs, lows, closes)
+    k_val, k_prev     = stochastic(highs, lows, closes)
+    vol_avg           = sum(volumes[-20:]) / 20
+    vol_ratio         = volumes[-1] / vol_avg if vol_avg > 0 else 1
 
     buy = sell = 0
 
@@ -151,39 +166,39 @@ def analyze(symbol: str, interval: str, mode: str):
     elif ema9_v[-1] < ema21_v[-1]: sell += 1
 
     # RSI
-    if rsi_val < 35: buy += 2
-    elif 35 < rsi_val < 55: buy += 1
-    if rsi_val > 70: sell += 2
+    if rsi_val < 35:   buy  += 2
+    elif rsi_val < 55: buy  += 1
+    if rsi_val > 70:   sell += 2
     elif rsi_val > 60: sell += 1
 
     # MACD
-    if macd_h > 0 and macd_h > macd_h_prev: buy += 2
-    elif macd_h > macd_h_prev: buy += 1
-    if macd_h < 0 and macd_h < macd_h_prev: sell += 2
-    elif macd_h < macd_h_prev: sell += 1
+    if macd_h > 0 and macd_h > macd_prev: buy  += 2
+    elif macd_h > macd_prev:              buy  += 1
+    if macd_h < 0 and macd_h < macd_prev: sell += 2
+    elif macd_h < macd_prev:              sell += 1
 
     # Bollinger
-    if price <= bb_low * 1.01: buy += 2
-    if price >= bb_up * 0.99:  sell += 2
+    if price <= bb_low * 1.01: buy  += 2
+    if price >= bb_up  * 0.99: sell += 2
 
     # Stochastic
-    if k_val < 30 and k_val > k_prev: buy += 2
-    elif k_val > k_prev: buy += 1
+    if k_val < 30 and k_val > k_prev: buy  += 2
+    elif k_val > k_prev:              buy  += 1
     if k_val > 70 and k_val < k_prev: sell += 2
-    elif k_val < k_prev: sell += 1
+    elif k_val < k_prev:              sell += 1
 
     # EMA50 + Volume
-    if price > ema50_v[-1]: buy += 1
-    else: sell += 1
-    if vol_ratio > 1.5: buy += 1 if buy > sell else 0
+    if price > ema50_v[-1]: buy  += 1
+    else:                   sell += 1
+    if vol_ratio > 1.5:
+        if buy > sell: buy  += 1
+        else:          sell += 1
 
     MIN = 6
     if buy >= MIN and buy > sell:
-        direction = "BUY"
-        score = buy
+        direction, score = "BUY", buy
     elif sell >= MIN and sell > buy:
-        direction = "SELL"
-        score = sell
+        direction, score = "SELL", sell
     else:
         return None
 
@@ -215,25 +230,18 @@ def analyze(symbol: str, interval: str, mode: str):
     }
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  إرسال رسالة
+#  تنسيق الرسالة
 # ════════════════════════════════════════════════════════════════════════════════
-def send_msg(text: str):
-    try:
-        bot.send_message(TELEGRAM_CHAT_ID, text, parse_mode="HTML")
-        logger.info("✅ Message sent")
-    except Exception as e:
-        logger.error(f"Send error: {e}")
-
 def format_signal(s: dict) -> str:
-    d   = "🟢 BUY" if s["direction"] == "BUY" else "🔴 SELL"
-    m   = "⚡ سكالب" if s["mode"] == "scalp" else "📅 يومي"
+    d = "🟢 BUY" if s["direction"] == "BUY" else "🔴 SELL"
+    m = "⚡ سكالب" if s["mode"] == "scalp" else "📅 يومي"
     return (
         f"{d} — <b>{s['symbol']}</b>\n"
         f"{m} | فريم: {s['timeframe']}\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"💰 السعر الحالي:  <b>{s['price']}</b>\n"
-        f"🎯 نقطة الدخول:  <b>{s['entry']}</b>\n"
-        f"🛑 وقف الخسارة:  <b>{s['stop_loss']}</b>\n"
+        f"🎯 نقطة الدخول:   <b>{s['entry']}</b>\n"
+        f"🛑 وقف الخسارة:   <b>{s['stop_loss']}</b>\n"
         f"━━━━━━━━━━━━━━━━━━━\n"
         f"✅ هدف 1:  {s['t1']}  (+{s['p1']}%)\n"
         f"✅ هدف 2:  {s['t2']}  (+{s['p2']}%)\n"
@@ -260,12 +268,12 @@ def run_cycle():
                 logger.error(f"Error {symbol} {mode}: {e}")
             time.sleep(0.3)
 
-def send_heartbeat():
+def send_heartbeat(cycle: int):
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
     send_msg(
         f"💓 <b>البوت يعمل بشكل طبيعي</b>\n"
         f"🕐 {now}\n"
-        f"📈 يراقب {len(SYMBOLS)} عملة\n"
+        f"📈 يراقب {len(SYMBOLS)} عملة | دورة #{cycle}\n"
         f"⚡ Scalp: 15m  |  📅 Daily: 4h"
     )
 
@@ -280,11 +288,12 @@ def main():
 
     cycle = 0
     while True:
-        start = time.time()
+        start  = time.time()
         cycle += 1
+        logger.info(f"🔄 Cycle #{cycle}")
         run_cycle()
         if cycle % 4 == 0:
-            send_heartbeat()
+            send_heartbeat(cycle)
         elapsed = time.time() - start
         sleep_t = max(0, 15 * 60 - elapsed)
         logger.info(f"⏳ Next cycle in {sleep_t:.0f}s")
@@ -296,7 +305,6 @@ if __name__ == "__main__":
 
 ---
 
-**`requirements.txt`** (استبدل الموجود):
+**`requirements.txt`:**
 ```
-pyTelegramBotAPI==4.15.4
 requests
