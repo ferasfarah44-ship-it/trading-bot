@@ -24,7 +24,7 @@ SYMBOLS = [
 TIMEFRAMES = {"scalp": "15m", "daily": "4h"}
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  إرسال رسالة — عبر requests مباشرة (بدون polling / بدون conflict)
+# إرسال رسالة
 # ════════════════════════════════════════════════════════════════════════════════
 def send_msg(text: str):
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
@@ -48,27 +48,48 @@ def send_msg(text: str):
         logger.error(f"send_msg exception: {e}")
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  جلب البيانات من Binance
+# جلب البيانات من Binance (نسخة مصححة)
 # ════════════════════════════════════════════════════════════════════════════════
 def fetch_klines(symbol: str, interval: str, limit: int = 200):
+
     try:
         r = requests.get(
             "https://api.binance.com/api/v3/klines",
             params={"symbol": symbol, "interval": interval, "limit": limit},
             timeout=10
         )
+
+        if r.status_code != 200:
+            logger.error(f"Binance HTTP error {r.status_code}")
+            return [], [], [], []
+
         data = r.json()
-        closes  = [float(x[4]) for x in data]
-        highs   = [float(x[2]) for x in data]
-        lows    = [float(x[3]) for x in data]
-        volumes = [float(x[5]) for x in data]
+
+        # تحقق أن البيانات قائمة شموع
+        if not isinstance(data, list) or len(data) == 0:
+            logger.warning(f"No kline data for {symbol}")
+            return [], [], [], []
+
+        closes  = []
+        highs   = []
+        lows    = []
+        volumes = []
+
+        for x in data:
+            if len(x) >= 6:
+                closes.append(float(x[4]))
+                highs.append(float(x[2]))
+                lows.append(float(x[3]))
+                volumes.append(float(x[5]))
+
         return closes, highs, lows, volumes
+
     except Exception as e:
         logger.error(f"fetch_klines error {symbol} {interval}: {e}")
         return [], [], [], []
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  المؤشرات الفنية
+# المؤشرات الفنية
 # ════════════════════════════════════════════════════════════════════════════════
 def ema(data, period):
     k = 2 / (period + 1)
@@ -138,10 +159,12 @@ def stochastic(highs, lows, closes, k_period=14):
     return k, k_prev
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  منطق الإشارة
+# منطق الإشارة
 # ════════════════════════════════════════════════════════════════════════════════
 def analyze(symbol: str, interval: str, mode: str):
+
     closes, highs, lows, volumes = fetch_klines(symbol, interval)
+
     if len(closes) < 50:
         return None
 
@@ -154,63 +177,63 @@ def analyze(symbol: str, interval: str, mode: str):
     bb_up, _, bb_low  = bollinger(closes)
     atr_val           = atr(highs, lows, closes)
     k_val, k_prev     = stochastic(highs, lows, closes)
-    vol_avg           = sum(volumes[-20:]) / 20
-    vol_ratio         = volumes[-1] / vol_avg if vol_avg > 0 else 1
+
+    vol_avg   = sum(volumes[-20:]) / 20
+    vol_ratio = volumes[-1] / vol_avg if vol_avg > 0 else 1
 
     buy = sell = 0
 
-    # EMA
     if ema9_v[-1] > ema21_v[-1] and ema9_v[-2] <= ema21_v[-2]: buy += 2
     elif ema9_v[-1] > ema21_v[-1]: buy += 1
+
     if ema9_v[-1] < ema21_v[-1] and ema9_v[-2] >= ema21_v[-2]: sell += 2
     elif ema9_v[-1] < ema21_v[-1]: sell += 1
 
-    # RSI
-    if rsi_val < 35:   buy  += 2
-    elif rsi_val < 55: buy  += 1
-    if rsi_val > 70:   sell += 2
+    if rsi_val < 35: buy += 2
+    elif rsi_val < 55: buy += 1
+
+    if rsi_val > 70: sell += 2
     elif rsi_val > 60: sell += 1
 
-    # MACD
-    if macd_h > 0 and macd_h > macd_prev: buy  += 2
-    elif macd_h > macd_prev:              buy  += 1
+    if macd_h > 0 and macd_h > macd_prev: buy += 2
+    elif macd_h > macd_prev: buy += 1
+
     if macd_h < 0 and macd_h < macd_prev: sell += 2
-    elif macd_h < macd_prev:              sell += 1
+    elif macd_h < macd_prev: sell += 1
 
-    # Bollinger
-    if price <= bb_low * 1.01: buy  += 2
-    if price >= bb_up  * 0.99: sell += 2
+    if price <= bb_low * 1.01: buy += 2
+    if price >= bb_up * 0.99: sell += 2
 
-    # Stochastic
-    if k_val < 30 and k_val > k_prev: buy  += 2
-    elif k_val > k_prev:              buy  += 1
+    if k_val < 30 and k_val > k_prev: buy += 2
+    elif k_val > k_prev: buy += 1
+
     if k_val > 70 and k_val < k_prev: sell += 2
-    elif k_val < k_prev:              sell += 1
+    elif k_val < k_prev: sell += 1
 
-    # EMA50 + Volume
-    if price > ema50_v[-1]: buy  += 1
-    else:                   sell += 1
+    if price > ema50_v[-1]: buy += 1
+    else: sell += 1
+
     if vol_ratio > 1.5:
-        if buy > sell: buy  += 1
-        else:          sell += 1
+        if buy > sell: buy += 1
+        else: sell += 1
 
     MIN = 6
+
     if buy >= MIN and buy > sell:
-        direction, score = "BUY", buy
+        direction = "BUY"
     elif sell >= MIN and sell > buy:
-        direction, score = "SELL", sell
+        direction = "SELL"
     else:
         return None
 
-    # الأهداف
+    entry = price
+
     if direction == "BUY":
-        entry     = price
         stop_loss = round(entry - 1.5 * atr_val, 6)
         t1 = round(entry + 1.0 * atr_val, 6)
         t2 = round(entry + 2.0 * atr_val, 6)
         t3 = round(entry + 3.5 * atr_val, 6)
     else:
-        entry     = price
         stop_loss = round(entry + 1.5 * atr_val, 6)
         t1 = round(entry - 1.0 * atr_val, 6)
         t2 = round(entry - 2.0 * atr_val, 6)
@@ -219,22 +242,32 @@ def analyze(symbol: str, interval: str, mode: str):
     def pct(t): return round(abs(t - entry) / entry * 100, 2)
 
     return {
-        "symbol": symbol, "direction": direction,
-        "mode": mode, "timeframe": interval,
-        "price": round(price, 6), "entry": round(entry, 6),
+        "symbol": symbol,
+        "direction": direction,
+        "mode": mode,
+        "timeframe": interval,
+        "price": round(price, 6),
+        "entry": round(entry, 6),
         "stop_loss": stop_loss,
-        "t1": t1, "t2": t2, "t3": t3,
-        "p1": pct(t1), "p2": pct(t2), "p3": pct(t3),
-        "rsi": round(rsi_val, 1), "score": score,
+        "t1": t1,
+        "t2": t2,
+        "t3": t3,
+        "p1": pct(t1),
+        "p2": pct(t2),
+        "p3": pct(t3),
+        "rsi": round(rsi_val, 1),
+        "score": max(buy, sell),
         "vol_ratio": round(vol_ratio, 2),
     }
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  تنسيق الرسالة
+# تنسيق الرسالة
 # ════════════════════════════════════════════════════════════════════════════════
 def format_signal(s: dict) -> str:
+
     d = "🟢 BUY" if s["direction"] == "BUY" else "🔴 SELL"
     m = "⚡ سكالب" if s["mode"] == "scalp" else "📅 يومي"
+
     return (
         f"{d} — <b>{s['symbol']}</b>\n"
         f"{m} | فريم: {s['timeframe']}\n"
@@ -253,23 +286,30 @@ def format_signal(s: dict) -> str:
     )
 
 # ════════════════════════════════════════════════════════════════════════════════
-#  الحلقة الرئيسية
+# الحلقة الرئيسية
 # ════════════════════════════════════════════════════════════════════════════════
 def run_cycle():
+
     logger.info("🔍 Running analysis cycle...")
+
     for symbol in SYMBOLS:
-        for mode, tf in TIMEFRAMES.items():
+        for mode, tf in TIMEFRAMES:
+
             try:
                 sig = analyze(symbol, tf, mode)
                 if sig:
                     send_msg(format_signal(sig))
                     time.sleep(1)
+
             except Exception as e:
                 logger.error(f"Error {symbol} {mode}: {e}")
+
             time.sleep(0.3)
 
 def send_heartbeat(cycle: int):
+
     now = datetime.utcnow().strftime("%Y-%m-%d %H:%M UTC")
+
     send_msg(
         f"💓 <b>البوت يعمل بشكل طبيعي</b>\n"
         f"🕐 {now}\n"
@@ -278,7 +318,9 @@ def send_heartbeat(cycle: int):
     )
 
 def main():
+
     logger.info("🚀 Bot starting...")
+
     send_msg(
         f"🚀 <b>بوت التحليل بدأ العمل!</b>\n"
         f"📊 SOL LINK ETH XRP NEAR ARB OP APT AVAX BTC\n"
@@ -287,24 +329,27 @@ def main():
     )
 
     cycle = 0
+
     while True:
-        start  = time.time()
+
+        start = time.time()
+
         cycle += 1
+
         logger.info(f"🔄 Cycle #{cycle}")
+
         run_cycle()
+
         if cycle % 4 == 0:
             send_heartbeat(cycle)
+
         elapsed = time.time() - start
+
         sleep_t = max(0, 15 * 60 - elapsed)
+
         logger.info(f"⏳ Next cycle in {sleep_t:.0f}s")
+
         time.sleep(sleep_t)
 
 if __name__ == "__main__":
     main()
-```
-
----
-
-**`requirements.txt`:**
-```
-requests
