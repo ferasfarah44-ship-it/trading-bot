@@ -2,19 +2,19 @@ import requests
 import os
 import time
 
-print("ANALYSIS BOT VERSION 4")
+print("ANALYSIS BOT VERSION 5")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-SYMBOLS = [
-"SOLUSDT",
-"ETHUSDT",
-"ARBUSDT",
-"LINKUSDT",
-"NEARUSDT",
-"OPUSDT"
-]
+COINS = {
+"SOLUSDT":"solana",
+"ETHUSDT":"ethereum",
+"ARBUSDT":"arbitrum",
+"LINKUSDT":"chainlink",
+"NEARUSDT":"near",
+"OPUSDT":"optimism"
+}
 
 def send(msg):
 
@@ -22,17 +22,19 @@ def send(msg):
         print("telegram variables missing")
         return
 
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
+    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     try:
-        r = requests.post(url,json={
-            "chat_id":CHAT_ID,
-            "text":msg
+
+        r=requests.post(url,json={
+        "chat_id":CHAT_ID,
+        "text":msg
         })
 
         print("telegram status:",r.status_code)
 
     except Exception as e:
+
         print("telegram error:",e)
 
 
@@ -40,23 +42,23 @@ def get_data(symbol):
 
     try:
 
-        coin = symbol.replace("USDT","").lower()
+        coin=COINS[symbol]
 
-        url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+        url=f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
 
-        params = {
-            "vs_currency":"usd",
-            "days":"1"
+        params={
+        "vs_currency":"usd",
+        "days":"1"
         }
 
-        r = requests.get(url,params=params,timeout=10)
-        data = r.json()
+        r=requests.get(url,params=params,timeout=10)
+        data=r.json()
 
-        prices = data["prices"]
-        volumes = data["total_volumes"]
+        prices=data["prices"]
+        volumes=data["total_volumes"]
 
-        closes = [p[1] for p in prices[-120:]]
-        volumes = [v[1] for v in volumes[-120:]]
+        closes=[p[1] for p in prices[-120:]]
+        volumes=[v[1] for v in volumes[-120:]]
 
         return closes,volumes
 
@@ -69,9 +71,11 @@ def get_data(symbol):
 def ema(data,period):
 
     k=2/(period+1)
+
     ema_val=data[0]
 
     for price in data[1:]:
+
         ema_val=price*k+ema_val*(1-k)
 
     return ema_val
@@ -83,12 +87,16 @@ def rsi(data,period=14):
     losses=[]
 
     for i in range(1,len(data)):
+
         diff=data[i]-data[i-1]
 
         if diff>0:
+
             gains.append(diff)
             losses.append(0)
+
         else:
+
             gains.append(0)
             losses.append(abs(diff))
 
@@ -140,17 +148,19 @@ Volume rising
 
 send("🚀 bot started")
 
+
 while True:
 
     try:
 
         print("starting analysis cycle")
 
-        for symbol in SYMBOLS:
+        for symbol in COINS:
 
             signal=analyze(symbol)
 
             if signal:
+
                 send(signal)
 
             time.sleep(2)
