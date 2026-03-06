@@ -1,6 +1,18 @@
 import requests
+import os
+import time
 
-print("requests works")
+TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT  = os.environ["TELEGRAM_CHAT_ID"]
 
-r = requests.get("https://api.telegram.org")
-print(r.status_code)
+url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+
+while True:
+    requests.post(url, json={
+        "chat_id": CHAT,
+        "text": "البوت يعمل الآن ✅"
+    })
+
+    print("message sent")
+
+    time.sleep(60)
