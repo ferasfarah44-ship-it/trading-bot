@@ -2,7 +2,7 @@ import requests
 import os
 import time
 
-print("ANALYSIS BOT VERSION 1")
+print("ANALYSIS BOT VERSION 2")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -25,89 +25,114 @@ def send(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     try:
-        r = requests.post(url, json={
-            "chat_id": CHAT_ID,
-            "text": msg
+        r = requests.post(url,json={
+            "chat_id":CHAT_ID,
+            "text":msg
         })
 
-        print("telegram status:", r.status_code)
+        print("telegram status:",r.status_code)
 
     except Exception as e:
-        print("telegram error:", e)
+        print("telegram error:",e)
 
 
 def get_data(symbol):
 
-    url = "https://api.binance.com/api/v3/klines"
+    try:
 
-    params = {
-        "symbol": symbol,
-        "interval": "15m",
-        "limit": 120
-    }
+        url="https://api.binance.com/api/v3/klines"
 
-    r = requests.get(url, params=params)
-    data = r.json()
+        params={
+            "symbol":symbol,
+            "interval":"15m",
+            "limit":120
+        }
 
-    closes = [float(x[4]) for x in data]
-    volumes = [float(x[5]) for x in data]
+        r=requests.get(url,params=params,timeout=10)
 
-    return closes, volumes
+        data=r.json()
+
+        if not isinstance(data,list):
+            print("bad response:",data)
+            return None,None
+
+        closes=[]
+        volumes=[]
+
+        for k in data:
+
+            if len(k)>=6:
+                closes.append(float(k[4]))
+                volumes.append(float(k[5]))
+
+        if len(closes)<30:
+            print("not enough candles")
+            return None,None
+
+        return closes,volumes
+
+    except Exception as e:
+        print("binance error:",e)
+        return None,None
 
 
-def ema(data, period):
+def ema(data,period):
 
-    k = 2 / (period + 1)
-    ema_val = data[0]
+    k=2/(period+1)
+    ema_val=data[0]
 
     for price in data[1:]:
-        ema_val = price * k + ema_val * (1 - k)
+        ema_val=price*k+ema_val*(1-k)
 
     return ema_val
 
 
-def rsi(data, period=14):
+def rsi(data,period=14):
 
-    gains = []
-    losses = []
+    gains=[]
+    losses=[]
 
-    for i in range(1, len(data)):
-        diff = data[i] - data[i-1]
+    for i in range(1,len(data)):
+        diff=data[i]-data[i-1]
 
-        if diff > 0:
+        if diff>0:
             gains.append(diff)
             losses.append(0)
         else:
             gains.append(0)
             losses.append(abs(diff))
 
-    avg_gain = sum(gains[-period:]) / period
-    avg_loss = sum(losses[-period:]) / period
+    avg_gain=sum(gains[-period:])/period
+    avg_loss=sum(losses[-period:])/period
 
-    if avg_loss == 0:
+    if avg_loss==0:
         return 100
 
-    rs = avg_gain / avg_loss
-    return 100 - (100 / (1 + rs))
+    rs=avg_gain/avg_loss
+
+    return 100-(100/(1+rs))
 
 
 def analyze(symbol):
 
-    closes, volumes = get_data(symbol)
+    closes,volumes=get_data(symbol)
 
-    price = closes[-1]
+    if closes is None:
+        return None
 
-    ema9 = ema(closes[-20:], 9)
-    ema21 = ema(closes[-40:], 21)
+    price=closes[-1]
 
-    r = rsi(closes)
+    ema9=ema(closes[-20:],9)
+    ema21=ema(closes[-40:],21)
 
-    vol_now = volumes[-1]
-    vol_prev = volumes[-2]
+    r=rsi(closes)
 
-    print(symbol, "RSI:", round(r,2), "EMA9:", round(ema9,2), "EMA21:", round(ema21,2))
+    vol_now=volumes[-1]
+    vol_prev=volumes[-2]
 
-    if ema9 > ema21 and 40 < r < 65 and vol_now > vol_prev:
+    print(symbol,"RSI:",round(r,2),"EMA9:",round(ema9,2),"EMA21:",round(ema21,2))
+
+    if ema9>ema21 and 40<r<65 and vol_now>vol_prev:
 
         return f"""
 🚀 فرصة سكالبينغ
@@ -125,7 +150,6 @@ Volume rising
 
 send("🚀 bot started")
 
-
 while True:
 
     try:
@@ -134,7 +158,7 @@ while True:
 
         for symbol in SYMBOLS:
 
-            signal = analyze(symbol)
+            signal=analyze(symbol)
 
             if signal:
                 send(signal)
@@ -147,5 +171,5 @@ while True:
 
     except Exception as e:
 
-        print("error:", e)
+        print("loop error:",e)
         time.sleep(60)
