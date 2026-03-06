@@ -1,175 +1,161 @@
 import requests
-import os
 import time
+import os
+import numpy as np
 
-print("ANALYSIS BOT VERSION 5")
+print("ANALYSIS BOT VERSION 6")
 
-BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
+CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
 
 COINS = {
-"SOLUSDT":"solana",
-"ETHUSDT":"ethereum",
-"ARBUSDT":"arbitrum",
-"LINKUSDT":"chainlink",
-"NEARUSDT":"near",
-"OPUSDT":"optimism"
+    "SOLUSDT": "solana",
+    "ETHUSDT": "ethereum",
+    "ARBUSDT": "arbitrum",
+    "LINKUSDT": "chainlink",
+    "NEARUSDT": "near",
+    "OPUSDT": "optimism"
 }
 
 def send(msg):
 
-    if not BOT_TOKEN or not CHAT_ID:
-        print("telegram variables missing")
-        return
-
-    url=f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-
     try:
 
-        r=requests.post(url,json={
-        "chat_id":CHAT_ID,
-        "text":msg
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+        requests.post(url, data={
+            "chat_id": CHAT_ID,
+            "text": msg
         })
 
-        print("telegram status:",r.status_code)
-
     except Exception as e:
+        print("telegram error:", e)
 
-        print("telegram error:",e)
+
+def ema(data, period):
+
+    data = np.array(data)
+    weights = np.exp(np.linspace(-1., 0., period))
+    weights /= weights.sum()
+
+    a = np.convolve(data, weights, mode='full')[:len(data)]
+    a[:period] = a[period]
+
+    return a
+
+
+def rsi(data, period=14):
+
+    data = np.array(data)
+    delta = np.diff(data)
+
+    up = delta.clip(min=0)
+    down = -1 * delta.clip(max=0)
+
+    ma_up = np.mean(up[-period:])
+    ma_down = np.mean(down[-period:])
+
+    if ma_down == 0:
+        return 100
+
+    rs = ma_up / ma_down
+
+    return 100 - (100 / (1 + rs))
 
 
 def get_data(symbol):
 
     try:
 
-        coin=COINS[symbol]
+        coin = COINS[symbol]
 
-        url=f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+        url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
 
-        params={
-        "vs_currency":"usd",
-        "days":"1"
+        params = {
+            "vs_currency": "usd",
+            "days": "1"
         }
 
-        r=requests.get(url,params=params,timeout=10)
-        data=r.json()
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
 
-        prices=data["prices"]
-        volumes=data["total_volumes"]
+        if "prices" not in data:
+            print("coingecko skip:", symbol)
+            return None
 
-        closes=[p[1] for p in prices[-120:]]
-        volumes=[v[1] for v in volumes[-120:]]
+        prices = data["prices"]
 
-        return closes,volumes
+        if len(prices) < 60:
+            return None
+
+        closes = [p[1] for p in prices[-120:]]
+
+        return closes
 
     except Exception as e:
 
-        print("coingecko error:",e)
-        return None,None
-
-
-def ema(data,period):
-
-    k=2/(period+1)
-
-    ema_val=data[0]
-
-    for price in data[1:]:
-
-        ema_val=price*k+ema_val*(1-k)
-
-    return ema_val
-
-
-def rsi(data,period=14):
-
-    gains=[]
-    losses=[]
-
-    for i in range(1,len(data)):
-
-        diff=data[i]-data[i-1]
-
-        if diff>0:
-
-            gains.append(diff)
-            losses.append(0)
-
-        else:
-
-            gains.append(0)
-            losses.append(abs(diff))
-
-    avg_gain=sum(gains[-period:])/period
-    avg_loss=sum(losses[-period:])/period
-
-    if avg_loss==0:
-        return 100
-
-    rs=avg_gain/avg_loss
-
-    return 100-(100/(1+rs))
+        print("coingecko error:", e)
+        return None
 
 
 def analyze(symbol):
 
-    closes,volumes=get_data(symbol)
+    closes = get_data(symbol)
 
     if closes is None:
-        return None
+        return
 
-    price=closes[-1]
+    r = rsi(closes)
 
-    ema9=ema(closes[-20:],9)
-    ema21=ema(closes[-40:],21)
+    e9 = ema(closes, 9)[-1]
+    e21 = ema(closes, 21)[-1]
 
-    r=rsi(closes)
+    price = closes[-1]
 
-    vol_now=volumes[-1]
-    vol_prev=volumes[-2]
+    print(symbol, "RSI:", round(r,2), "EMA9:", round(e9,2), "EMA21:", round(e21,2))
 
-    print(symbol,"RSI:",round(r,2),"EMA9:",round(ema9,2),"EMA21:",round(ema21,2))
+    signal = None
 
-    if ema9>ema21 and 40<r<65 and vol_now>vol_prev:
+    if r < 35 and e9 > e21:
+        signal = "BUY"
 
-        return f"""
-🚀 فرصة سكالبينغ
+    elif r > 65 and e9 < e21:
+        signal = "SELL"
 
-العملة: {symbol}
-السعر: {price}
+    if signal:
 
+        msg = f"""
+🔥 SIGNAL
+
+PAIR: {symbol}
+TYPE: {signal}
+
+PRICE: {round(price,4)}
 RSI: {round(r,2)}
-EMA9>EMA21
-Volume rising
+
+EMA9: {round(e9,2)}
+EMA21: {round(e21,2)}
 """
 
-    return None
+        send(msg)
 
 
-send("🚀 bot started")
+def cycle():
 
+    print("starting analysis cycle")
+
+    for symbol in COINS:
+
+        analyze(symbol)
+        time.sleep(3)
+
+    print("cycle done")
+
+
+send("bot running...")
 
 while True:
 
-    try:
+    cycle()
 
-        print("starting analysis cycle")
-
-        for symbol in COINS:
-
-            signal=analyze(symbol)
-
-            if signal:
-
-                send(signal)
-
-            time.sleep(2)
-
-        print("cycle done")
-
-        time.sleep(900)
-
-    except Exception as e:
-
-        print("loop error:",e)
-        time.sleep(60)
+    time.sleep(900)
