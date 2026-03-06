@@ -2,7 +2,7 @@ import requests
 import os
 import time
 
-print("ANALYSIS BOT VERSION 2")
+print("ANALYSIS BOT VERSION 3")
 
 BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
@@ -25,114 +25,115 @@ def send(msg):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
 
     try:
-        r = requests.post(url,json={
-            "chat_id":CHAT_ID,
-            "text":msg
+        r = requests.post(url, json={
+            "chat_id": CHAT_ID,
+            "text": msg
         })
 
-        print("telegram status:",r.status_code)
+        print("telegram status:", r.status_code)
 
     except Exception as e:
-        print("telegram error:",e)
+        print("telegram error:", e)
 
 
 def get_data(symbol):
 
     try:
 
-        url="https://api.binance.com/api/v3/klines"
+        url = "https://api.bybit.com/v5/market/kline"
 
-        params={
-            "symbol":symbol,
-            "interval":"15m",
-            "limit":120
+        params = {
+            "category": "spot",
+            "symbol": symbol,
+            "interval": "15",
+            "limit": 120
         }
 
-        r=requests.get(url,params=params,timeout=10)
+        r = requests.get(url, params=params, timeout=10)
+        data = r.json()
 
-        data=r.json()
+        if "result" not in data:
+            print("bad response:", data)
+            return None, None
 
-        if not isinstance(data,list):
-            print("bad response:",data)
-            return None,None
+        candles = data["result"]["list"]
 
-        closes=[]
-        volumes=[]
+        closes = []
+        volumes = []
 
-        for k in data:
+        for c in candles:
 
-            if len(k)>=6:
-                closes.append(float(k[4]))
-                volumes.append(float(k[5]))
+            closes.append(float(c[4]))
+            volumes.append(float(c[5]))
 
-        if len(closes)<30:
-            print("not enough candles")
-            return None,None
+        closes.reverse()
+        volumes.reverse()
 
-        return closes,volumes
+        return closes, volumes
 
     except Exception as e:
-        print("binance error:",e)
-        return None,None
+
+        print("bybit error:", e)
+        return None, None
 
 
-def ema(data,period):
+def ema(data, period):
 
-    k=2/(period+1)
-    ema_val=data[0]
+    k = 2 / (period + 1)
+    ema_val = data[0]
 
     for price in data[1:]:
-        ema_val=price*k+ema_val*(1-k)
+        ema_val = price * k + ema_val * (1 - k)
 
     return ema_val
 
 
-def rsi(data,period=14):
+def rsi(data, period=14):
 
-    gains=[]
-    losses=[]
+    gains = []
+    losses = []
 
-    for i in range(1,len(data)):
-        diff=data[i]-data[i-1]
+    for i in range(1, len(data)):
 
-        if diff>0:
+        diff = data[i] - data[i-1]
+
+        if diff > 0:
             gains.append(diff)
             losses.append(0)
         else:
             gains.append(0)
             losses.append(abs(diff))
 
-    avg_gain=sum(gains[-period:])/period
-    avg_loss=sum(losses[-period:])/period
+    avg_gain = sum(gains[-period:]) / period
+    avg_loss = sum(losses[-period:]) / period
 
-    if avg_loss==0:
+    if avg_loss == 0:
         return 100
 
-    rs=avg_gain/avg_loss
-
-    return 100-(100/(1+rs))
+    rs = avg_gain / avg_loss
+    return 100 - (100 / (1 + rs))
 
 
 def analyze(symbol):
 
-    closes,volumes=get_data(symbol)
+    closes, volumes = get_data(symbol)
 
     if closes is None:
         return None
 
-    price=closes[-1]
+    price = closes[-1]
 
-    ema9=ema(closes[-20:],9)
-    ema21=ema(closes[-40:],21)
+    ema9 = ema(closes[-20:], 9)
+    ema21 = ema(closes[-40:], 21)
 
-    r=rsi(closes)
+    r = rsi(closes)
 
-    vol_now=volumes[-1]
-    vol_prev=volumes[-2]
+    vol_now = volumes[-1]
+    vol_prev = volumes[-2]
 
-    print(symbol,"RSI:",round(r,2),"EMA9:",round(ema9,2),"EMA21:",round(ema21,2))
+    print(symbol, "RSI:", round(r,2), "EMA9:", round(ema9,2), "EMA21:", round(ema21,2))
 
-    if ema9>ema21 and 40<r<65 and vol_now>vol_prev:
+    if ema9 > ema21 and 40 < r < 65 and vol_now > vol_prev:
 
         return f"""
 🚀 فرصة سكالبينغ
@@ -150,6 +151,7 @@ Volume rising
 
 send("🚀 bot started")
 
+
 while True:
 
     try:
@@ -158,7 +160,7 @@ while True:
 
         for symbol in SYMBOLS:
 
-            signal=analyze(symbol)
+            signal = analyze(symbol)
 
             if signal:
                 send(signal)
@@ -171,5 +173,5 @@ while True:
 
     except Exception as e:
 
-        print("loop error:",e)
+        print("loop error:", e)
         time.sleep(60)
