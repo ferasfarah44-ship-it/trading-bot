@@ -1,208 +1,136 @@
 import requests
+import pandas as pd
 import time
-import os
-import numpy as np
+import ta
 
-print("ANALYSIS BOT VERSION 8")
+# Telegram
+TELEGRAM_TOKEN = "PUT_YOUR_BOT_TOKEN"
+CHAT_ID = "PUT_YOUR_CHAT_ID"
 
-TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
-CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
+# العملات
+coins = [
+"BTCUSDT","ETHUSDT","SOLUSDT","NEARUSDT","OPUSDT","LINKUSDT","ARBUSDT",
+"BNBUSDT","AVAXUSDT","MATICUSDT","ATOMUSDT","INJUSDT","FETUSDT","RNDRUSDT"
+]
 
-COINS = {
-    "SOLUSDT": "solana",
-    "ETHUSDT": "ethereum",
-    "ARBUSDT": "arbitrum",
-    "LINKUSDT": "chainlink",
-    "NEARUSDT": "near",
-    "OPUSDT": "optimism"
-}
+# ارسال رسالة
+def send_telegram(msg):
 
-def send(msg):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {
+        "chat_id": CHAT_ID,
+        "text": msg
+    }
 
-        requests.post(url, data={
-            "chat_id": CHAT_ID,
-            "text": msg
-        })
+    requests.post(url,data=data)
 
-    except Exception as e:
-        print("telegram error:", e)
-
-
-def ema(data, period):
-
-    data = np.array(data)
-    weights = np.exp(np.linspace(-1., 0., period))
-    weights /= weights.sum()
-
-    a = np.convolve(data, weights, mode='full')[:len(data)]
-    a[:period] = a[period]
-
-    return a
-
-
-def rsi(data, period=14):
-
-    data = np.array(data)
-    delta = np.diff(data)
-
-    up = delta.clip(min=0)
-    down = -1 * delta.clip(max=0)
-
-    ma_up = np.mean(up[-period:])
-    ma_down = np.mean(down[-period:])
-
-    if ma_down == 0:
-        return 100
-
-    rs = ma_up / ma_down
-
-    return 100 - (100 / (1 + rs))
-
-
+# جلب بيانات Binance
 def get_data(symbol):
 
-    try:
+    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=200"
 
-        coin = COINS[symbol]
+    data = requests.get(url).json()
 
-        url = f"https://api.coingecko.com/api/v3/coins/{coin}/market_chart"
+    df = pd.DataFrame(data)
 
-        params = {
-            "vs_currency": "usd",
-            "days": "1",
-            "interval": "minutely"
-        }
+    df = df.iloc[:,0:6]
+    df.columns = ["time","open","high","low","close","volume"]
 
-        r = requests.get(url, params=params, timeout=10)
+    df["close"] = df["close"].astype(float)
+    df["volume"] = df["volume"].astype(float)
 
-        if r.status_code != 200:
-            return None
+    return df
 
-        data = r.json()
-
-        if "prices" not in data:
-            return None
-
-        prices = data["prices"]
-
-        if len(prices) < 50:
-            return None
-
-        closes = [p[1] for p in prices[-120:]]
-
-        return closes
-
-    except Exception as e:
-
-        print("coingecko error:", e)
-        return None
-
-
+# التحليل
 def analyze(symbol):
 
-    closes = get_data(symbol)
+    df = get_data(symbol)
 
-    if closes is None:
-        return
+    df["ema20"] = ta.trend.ema_indicator(df["close"],20)
+    df["ema50"] = ta.trend.ema_indicator(df["close"],50)
 
-    price = closes[-1]
+    df["rsi"] = ta.momentum.rsi(df["close"],14)
 
-    ema9 = ema(closes, 9)[-1]
-    ema21 = ema(closes, 21)[-1]
-    ema100 = ema(closes, 100)[-1]
+    macd = ta.trend.MACD(df["close"])
 
-    r = rsi(closes)
+    df["macd"] = macd.macd()
+    df["macd_signal"] = macd.macd_signal()
 
-    score = 0
-    reasons = []
+    price = df["close"].iloc[-1]
 
-    if ema9 > ema21:
-        score += 25
-        reasons.append("EMA9>EMA21")
+    ema20 = df["ema20"].iloc[-1]
+    ema50 = df["ema50"].iloc[-1]
 
-    if 40 < r < 65:
-        score += 20
-        reasons.append("RSI healthy")
+    rsi = df["rsi"].iloc[-1]
 
-    if price > ema100:
-        score += 20
-        reasons.append("Price above EMA100")
+    macd_val = df["macd"].iloc[-1]
+    macd_signal = df["macd_signal"].iloc[-1]
 
-    if closes[-1] > closes[-2]:
-        score += 15
-        reasons.append("Momentum up")
+    volume = df["volume"].iloc[-1]
+    volume_prev = df["volume"].iloc[-2]
 
-    # Whale activity
-    avg_move = np.mean(np.abs(np.diff(closes[-20:])))
-    last_move = abs(closes[-1] - closes[-2])
+    signal = False
 
-    whale = False
+    # شروط الإشارة
+    if price > ema20 and ema20 > ema50 and rsi > 50 and macd_val > macd_signal and volume > volume_prev:
 
-    if last_move > avg_move * 2:
-        whale = True
-        score += 30
-        reasons.append("Whale activity")
+        signal = True
 
-    confidence = score
-
-    print(symbol, "confidence:", confidence)
-
-    if confidence >= 40:
+    if signal:
 
         entry = price
-        target1 = price * 1.01
-        target2 = price * 1.02
-        stop = price * 0.99
 
-        whale_text = ""
+        tp1 = price * 1.03
+        tp2 = price * 1.06
+        tp3 = price * 1.10
 
-        if whale:
-            whale_text = "\n🐋 Whale activity detected"
+        sl = price * 0.97
 
-        msg = f"""
-🚀 فرصة سكالبينغ
+        message = f"""
+🚀 Crypto Signal
 
-العملة: {symbol}
+Coin: {symbol}
 
-💰 السعر الحالي: {round(price,4)}
-📍 الدخول: {round(entry,4)}
+Current Price: {price:.4f}
 
-🎯 الهدف 1: {round(target1,4)}
-🎯 الهدف 2: {round(target2,4)}
+Entry: {entry:.4f}
 
-🛑 وقف الخسارة: {round(stop,4)}
+🎯 Targets
+TP1: {tp1:.4f}
+TP2: {tp2:.4f}
+TP3: {tp3:.4f}
 
-📊 RSI: {round(r,2)}
-📈 الثقة: {confidence}%
-
-{whale_text}
-
-الأسباب:
-{" , ".join(reasons)}
+🛑 Stop Loss
+{sl:.4f}
 """
 
-        send(msg)
+        send_telegram(message)
 
+# تشغيل البوت
+def run_bot():
 
-def cycle():
+    send_telegram("✅ Crypto Signal Bot Started")
 
-    print("starting analysis cycle")
+    last_heartbeat = time.time()
 
-    for symbol in COINS:
+    while True:
 
-        analyze(symbol)
-        time.sleep(3)
+        for coin in coins:
 
-    print("cycle done")
+            try:
+                analyze(coin)
 
+            except Exception as e:
+                print(e)
 
-send("bot running...")
+        # رسالة كل ساعة
+        if time.time() - last_heartbeat > 3600:
 
-while True:
+            send_telegram("🤖 Bot running normally")
 
-    cycle()
+            last_heartbeat = time.time()
 
-    time.sleep(900)
+        time.sleep(300)
+
+run_bot()
