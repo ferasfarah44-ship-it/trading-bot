@@ -97,7 +97,6 @@ def get_data(symbol):
         print("coingecko error:", e)
         return None
 
-
 def analyze(symbol):
 
     closes = get_data(symbol)
@@ -105,26 +104,53 @@ def analyze(symbol):
     if closes is None:
         return
 
-    r = rsi(closes)
-
-    e9 = ema(closes, 9)[-1]
-    e21 = ema(closes, 21)[-1]
-
     price = closes[-1]
 
-    print(symbol, "RSI:", round(r,2), "EMA9:", round(e9,2), "EMA21:", round(e21,2))
+    ema9 = ema(closes, 9)[-1]
+    ema21 = ema(closes, 21)[-1]
+    ema100 = ema(closes, 100)[-1]
 
-    signal = None
+    r = rsi(closes)
 
-    if r < 35 and e9 > e21:
-        signal = "BUY"
+    score = 0
+    reasons = []
 
-    elif r > 65 and e9 < e21:
-        signal = "SELL"
+    if ema9 > ema21:
+        score += 25
+        reasons.append("EMA9>EMA21")
 
-    if signal:
+    if 40 < r < 60:
+        score += 20
+        reasons.append("RSI neutral")
+
+    if price > ema100:
+        score += 20
+        reasons.append("Price above EMA100")
+
+    if closes[-1] > closes[-2]:
+        score += 15
+        reasons.append("Momentum up")
+
+    confidence = score
+
+    print(symbol,"confidence:",confidence)
+
+    if confidence >= 40:
 
         msg = f"""
+🚀 فرصة سكالبينغ
+
+العملة: {symbol}
+السعر: {price}
+
+الثقة: {confidence}%
+
+الأسباب:
+{" , ".join(reasons)}
+"""
+
+        send(msg)
+
 🔥 SIGNAL
 
 PAIR: {symbol}
