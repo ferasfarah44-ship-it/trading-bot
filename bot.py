@@ -3,7 +3,7 @@ import time
 import os
 import numpy as np
 
-print("ANALYSIS BOT VERSION 6")
+print("ANALYSIS BOT VERSION 8")
 
 TELEGRAM_TOKEN = os.environ["TELEGRAM_BOT_TOKEN"]
 CHAT_ID = os.environ["TELEGRAM_CHAT_ID"]
@@ -20,7 +20,6 @@ COINS = {
 def send(msg):
 
     try:
-
         url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
 
         requests.post(url, data={
@@ -73,19 +72,23 @@ def get_data(symbol):
 
         params = {
             "vs_currency": "usd",
-            "days": "1"
+            "days": "1",
+            "interval": "minutely"
         }
 
         r = requests.get(url, params=params, timeout=10)
+
+        if r.status_code != 200:
+            return None
+
         data = r.json()
 
         if "prices" not in data:
-            print("coingecko skip:", symbol)
             return None
 
         prices = data["prices"]
 
-        if len(prices) < 60:
+        if len(prices) < 50:
             return None
 
         closes = [p[1] for p in prices[-120:]]
@@ -96,6 +99,7 @@ def get_data(symbol):
 
         print("coingecko error:", e)
         return None
+
 
 def analyze(symbol):
 
@@ -119,9 +123,9 @@ def analyze(symbol):
         score += 25
         reasons.append("EMA9>EMA21")
 
-    if 40 < r < 60:
+    if 40 < r < 65:
         score += 20
-        reasons.append("RSI neutral")
+        reasons.append("RSI healthy")
 
     if price > ema100:
         score += 20
@@ -131,36 +135,53 @@ def analyze(symbol):
         score += 15
         reasons.append("Momentum up")
 
+    # Whale activity
+    avg_move = np.mean(np.abs(np.diff(closes[-20:])))
+    last_move = abs(closes[-1] - closes[-2])
+
+    whale = False
+
+    if last_move > avg_move * 2:
+        whale = True
+        score += 30
+        reasons.append("Whale activity")
+
     confidence = score
 
-    print(symbol,"confidence:",confidence)
+    print(symbol, "confidence:", confidence)
 
     if confidence >= 40:
+
+        entry = price
+        target1 = price * 1.01
+        target2 = price * 1.02
+        stop = price * 0.99
+
+        whale_text = ""
+
+        if whale:
+            whale_text = "\n🐋 Whale activity detected"
 
         msg = f"""
 🚀 فرصة سكالبينغ
 
 العملة: {symbol}
-السعر: {price}
 
-الثقة: {confidence}%
+💰 السعر الحالي: {round(price,4)}
+📍 الدخول: {round(entry,4)}
+
+🎯 الهدف 1: {round(target1,4)}
+🎯 الهدف 2: {round(target2,4)}
+
+🛑 وقف الخسارة: {round(stop,4)}
+
+📊 RSI: {round(r,2)}
+📈 الثقة: {confidence}%
+
+{whale_text}
 
 الأسباب:
 {" , ".join(reasons)}
-"""
-
-        send(msg)
-
-🔥 SIGNAL
-
-PAIR: {symbol}
-TYPE: {signal}
-
-PRICE: {round(price,4)}
-RSI: {round(r,2)}
-
-EMA9: {round(e9,2)}
-EMA21: {round(e21,2)}
 """
 
         send(msg)
