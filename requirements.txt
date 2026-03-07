@@ -1,2 +1,4 @@
 requests
-numpy
+pandas
+ta
+python-telegram-bot==13.15
