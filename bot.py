@@ -4,18 +4,17 @@ import pandas as pd
 import time
 import ta
 
-# ===== TELEGRAM SETTINGS FROM RAILWAY =====
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-# ===== COINS TO ANALYZE =====
 coins = [
-"BTCUSDT","ETHUSDT","SOLUSDT","NEARUSDT",
-"BNBUSDT","AVAXUSDT","MATICUSDT","ATOMUSDT",
-"LINKUSDT","ARBUSDT","OPUSDT"
+"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","MATICUSDT","LINKUSDT",
+"ATOMUSDT","NEARUSDT","APTUSDT","ARBUSDT","OPUSDT","INJUSDT","SUIUSDT","SEIUSDT","TIAUSDT","FTMUSDT",
+"ALGOUSDT","FILUSDT","ICPUSDT","EGLDUSDT","XTZUSDT","THETAUSDT","AAVEUSDT","SNXUSDT","CRVUSDT","UNIUSDT",
+"LDOUSDT","RUNEUSDT","KAVAUSDT","ROSEUSDT","MINAUSDT","IOTAUSDT","ZILUSDT","DYDXUSDT","IMXUSDT","ENSUSDT",
+"COMPUSDT","1INCHUSDT","BALUSDT","YFIUSDT","GMXUSDT","STXUSDT","KSMUSDT","OCEANUSDT","SKLUSDT","ANKRUSDT"
 ]
 
-# ===== TELEGRAM SEND FUNCTION =====
 def send_telegram(message):
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
@@ -26,13 +25,11 @@ def send_telegram(message):
     }
 
     try:
-        r = requests.post(url, data=payload)
-        print(r.text)
-    except Exception as e:
-        print("telegram error:", e)
+        requests.post(url, data=payload)
+    except:
+        pass
 
 
-# ===== GET BINANCE DATA =====
 def get_data(symbol):
 
     try:
@@ -47,13 +44,13 @@ def get_data(symbol):
         "taker_base_vol","taker_quote_vol","ignore"
         ])
 
-        df = df[["close","volume"]]
+        df = df[["open","high","low","close","volume"]]
 
         df["close"] = df["close"].astype(float)
         df["volume"] = df["volume"].astype(float)
-
-        if len(df) < 60:
-            return None
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["open"] = df["open"].astype(float)
 
         return df
 
@@ -61,7 +58,6 @@ def get_data(symbol):
         return None
 
 
-# ===== ANALYSIS =====
 def analyze(symbol):
 
     df = get_data(symbol)
@@ -72,7 +68,6 @@ def analyze(symbol):
     try:
 
         df["ema20"] = ta.trend.ema_indicator(df["close"],20)
-        df["ema50"] = ta.trend.ema_indicator(df["close"],50)
 
         df["rsi"] = ta.momentum.rsi(df["close"],14)
 
@@ -83,50 +78,114 @@ def analyze(symbol):
 
         price = df["close"].iloc[-1]
         ema20 = df["ema20"].iloc[-1]
-        ema50 = df["ema50"].iloc[-1]
         rsi = df["rsi"].iloc[-1]
 
         macd_val = df["macd"].iloc[-1]
         macd_signal = df["macd_signal"].iloc[-1]
 
         volume = df["volume"].iloc[-1]
-        volume_prev = df["volume"].iloc[-2]
 
-        # ===== SIGNAL CONDITIONS =====
-        if price > ema20 and ema20 > ema50 and rsi > 50 and macd_val > macd_signal and volume > volume_prev:
+        avg_volume = df["volume"].rolling(20).mean().iloc[-1]
 
-            entry = price
+        resistance = df["high"].rolling(20).max().iloc[-2]
 
-            tp1 = price * 1.03
-            tp2 = price * 1.06
-            tp3 = price * 1.10
+        candle_size = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
 
-            sl = price * 0.97
+        avg_candle = abs(df["close"] - df["open"]).rolling(20).mean().iloc[-1]
 
-            message = f"""
-🚀 CRYPTO SIGNAL
+        # 🔥 STRONG SIGNAL
+        if price > ema20 and rsi > 50 and macd_val > macd_signal and (price > resistance or volume > avg_volume * 1.5):
+
+            send_telegram(f"""
+🔥 STRONG SIGNAL
+
+Coin: {symbol}
+Entry: {price}
+
+TP1: {price*1.03}
+TP2: {price*1.06}
+TP3: {price*1.10}
+
+SL: {price*0.96}
+""")
+
+        # 📈 TREND
+        elif price > ema20 and rsi > 50 and macd_val > macd_signal:
+
+            send_telegram(f"""
+📈 TREND SIGNAL
+
+Coin: {symbol}
+Entry: {price}
+
+TP1: {price*1.02}
+TP2: {price*1.04}
+TP3: {price*1.06}
+
+SL: {price*0.97}
+""")
+
+        # 🚀 BREAKOUT
+        elif price > resistance or volume > avg_volume * 1.5:
+
+            send_telegram(f"""
+🚀 BREAKOUT SIGNAL
+
+Coin: {symbol}
+Entry: {price}
+
+TP1: {price*1.03}
+TP2: {price*1.06}
+TP3: {price*1.10}
+
+SL: {price*0.96}
+""")
+
+        # 🚨 PUMP ALERT
+        elif volume > avg_volume * 2 and rsi > 55 and price > ema20:
+
+            send_telegram(f"""
+🚨 PUMP ALERT
 
 Coin: {symbol}
 
-Price: {price:.4f}
+Price: {price}
 
-Entry: {entry:.4f}
+Volume Spike Detected
+""")
 
-🎯 Targets
-TP1: {tp1:.4f}
-TP2: {tp2:.4f}
-TP3: {tp3:.4f}
+        # 🐋 WHALE ACTIVITY
+        elif volume > avg_volume * 3 and candle_size > avg_candle * 2:
 
-🛑 StopLoss: {sl:.4f}
-"""
+            send_telegram(f"""
+🐋 WHALE ACTIVITY DETECTED
 
-            send_telegram(message)
+Coin: {symbol}
+
+Large Volume + Large Candle
+
+Price: {price}
+""")
+
+        # ⚡ EARLY BREAKOUT
+        elif price > resistance * 0.98 and volume > avg_volume * 1.3 and price > ema20:
+
+            send_telegram(f"""
+⚡ EARLY BREAKOUT
+
+Coin: {symbol}
+
+Price: {price}
+
+Resistance: {resistance}
+
+Possible Breakout Soon
+""")
 
     except:
         pass
 
 
-# ===== MAIN BOT LOOP =====
 def run_bot():
 
     send_telegram("✅ Crypto Signal Bot Started")
@@ -138,7 +197,6 @@ def run_bot():
         for coin in coins:
             analyze(coin)
 
-        # رسالة كل ساعة للتأكد أن البوت يعمل
         if time.time() - last_heartbeat > 3600:
 
             send_telegram("🤖 Bot Running Normally")
