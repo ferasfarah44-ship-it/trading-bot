@@ -3,10 +3,10 @@ import pandas as pd
 import time
 import ta
 
-TELEGRAM_TOKEN = "PUT_YOUR_TOKEN"
-CHAT_ID = "PUT_YOUR_CHAT_ID"
+TELEGRAM_TOKEN="PUT_YOUR_TOKEN"
+CHAT_ID="PUT_YOUR_CHAT_ID"
 
-coins = [
+coins=[
 "BTCUSDT","ETHUSDT","SOLUSDT","NEARUSDT","OPUSDT","LINKUSDT","ARBUSDT",
 "BNBUSDT","AVAXUSDT","MATICUSDT","ATOMUSDT","INJUSDT","FETUSDT","RNDRUSDT"
 ]
@@ -20,7 +20,12 @@ def send_telegram(msg):
         "text":msg
     }
 
-    requests.post(url,data=data)
+    try:
+        r=requests.post(url,data=data)
+        print(r.text)
+    except Exception as e:
+        print("telegram error",e)
+
 
 def get_data(symbol):
 
@@ -41,7 +46,7 @@ def get_data(symbol):
         df["close"]=df["close"].astype(float)
         df["volume"]=df["volume"].astype(float)
 
-        if len(df) < 60:
+        if len(df)<60:
             return None
 
         return df
@@ -70,12 +75,9 @@ def analyze(symbol):
         df["macd_signal"]=macd.macd_signal()
 
         price=df["close"].iloc[-1]
-
         ema20=df["ema20"].iloc[-1]
         ema50=df["ema50"].iloc[-1]
-
         rsi=df["rsi"].iloc[-1]
-
         macd_val=df["macd"].iloc[-1]
         macd_signal=df["macd_signal"].iloc[-1]
 
@@ -85,15 +87,13 @@ def analyze(symbol):
         if price>ema20 and ema20>ema50 and rsi>50 and macd_val>macd_signal and volume>volume_prev:
 
             entry=price
-
             tp1=price*1.03
             tp2=price*1.06
             tp3=price*1.10
-
             sl=price*0.97
 
             message=f"""
-🚀 Crypto Signal
+🚀 SIGNAL
 
 Coin: {symbol}
 
@@ -101,13 +101,11 @@ Price: {price:.4f}
 
 Entry: {entry:.4f}
 
-🎯 Targets
-TP1: {tp1:.4f}
-TP2: {tp2:.4f}
-TP3: {tp3:.4f}
+🎯 TP1: {tp1:.4f}
+🎯 TP2: {tp2:.4f}
+🎯 TP3: {tp3:.4f}
 
-🛑 Stop Loss
-{sl:.4f}
+🛑 StopLoss: {sl:.4f}
 """
 
             send_telegram(message)
@@ -118,7 +116,7 @@ TP3: {tp3:.4f}
 
 def run_bot():
 
-    send_telegram("✅ Crypto Signal Bot Started")
+    send_telegram("✅ BOT STARTED SUCCESSFULLY")
 
     last_heartbeat=time.time()
 
@@ -130,7 +128,7 @@ def run_bot():
 
         if time.time()-last_heartbeat>3600:
 
-            send_telegram("🤖 Bot running normally")
+            send_telegram("🤖 BOT STILL RUNNING")
 
             last_heartbeat=time.time()
 
