@@ -1,164 +1,209 @@
-import time
-import datetime
 import os
+import requests
 import pandas as pd
-import ccxt
-from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator, MACD
-from telegram import Bot
+import time
+import ta
 
-# Telegram
-TOKEN = os.getenv("TELEGRAM_TOKEN")
-CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHANNEL_ID = os.getenv("CHANNEL_ID")
 
-bot = Bot(token=TOKEN)
-
-# العملات
-cryptocurrencies = [
-"BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT",
-"ADA/USDT","AVAX/USDT","DOT/USDT","MATIC/USDT","LINK/USDT",
-"ATOM/USDT","NEAR/USDT","APT/USDT","ARB/USDT","OP/USDT",
-"INJ/USDT","SUI/USDT","SEI/USDT","FTM/USDT","FIL/USDT"
+coins = [
+"BTCUSDT","ETHUSDT","BNBUSDT","SOLUSDT","XRPUSDT","ADAUSDT","AVAXUSDT","DOTUSDT","MATICUSDT","LINKUSDT",
+"ATOMUSDT","NEARUSDT","APTUSDT","ARBUSDT","OPUSDT","INJUSDT","SUIUSDT","SEIUSDT","TIAUSDT","FTMUSDT",
+"ALGOUSDT","FILUSDT","ICPUSDT","EGLDUSDT","XTZUSDT","THETAUSDT","AAVEUSDT","SNXUSDT","CRVUSDT","UNIUSDT",
+"LDOUSDT","RUNEUSDT","KAVAUSDT","ROSEUSDT","MINAUSDT","IOTAUSDT","ZILUSDT","DYDXUSDT","IMXUSDT","ENSUSDT",
+"COMPUSDT","1INCHUSDT","BALUSDT","YFIUSDT","GMXUSDT","STXUSDT","KSMUSDT","OCEANUSDT","SKLUSDT","ANKRUSDT"
 ]
 
-# استخدام Kucoin بدل Binance
-exchange = ccxt.kucoin({
-    "enableRateLimit": True
-})
+def send_telegram(message):
 
-def get_ohlcv(symbol, timeframe="1h", limit=100):
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+
+    payload = {
+        "chat_id": CHANNEL_ID,
+        "text": message
+    }
 
     try:
-        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        requests.post(url, data=payload)
+    except:
+        pass
 
-        df = pd.DataFrame(
-            bars,
-            columns=["timestamp","open","high","low","close","volume"]
-        )
 
-        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
+def get_data(symbol):
+
+    try:
+
+        url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=1h&limit=200"
+
+        data = requests.get(url).json()
+
+        df = pd.DataFrame(data, columns=[
+        "time","open","high","low","close","volume",
+        "close_time","qav","num_trades",
+        "taker_base_vol","taker_quote_vol","ignore"
+        ])
+
+        df = df[["open","high","low","close","volume"]]
+
+        df["close"] = df["close"].astype(float)
+        df["volume"] = df["volume"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
+        df["open"] = df["open"].astype(float)
 
         return df
 
-    except Exception as e:
-        print("خطأ", symbol, e)
+    except:
         return None
 
 
-def analyze_market(symbol):
+def analyze(symbol):
 
-    df = get_ohlcv(symbol)
+    df = get_data(symbol)
 
-    if df is None or df.empty:
-        return None
+    if df is None:
+        return
 
-    close = df["close"]
-    high = df["high"]
-    volume = df["volume"]
+    try:
 
-    ema20 = EMAIndicator(close=close, window=20).ema_indicator()
-    rsi = RSIIndicator(close=close, window=14).rsi()
+        df["ema20"] = ta.trend.ema_indicator(df["close"],20)
 
-    macd = MACD(close=close)
+        df["rsi"] = ta.momentum.rsi(df["close"],14)
 
-    macd_line = macd.macd()
-    signal_line = macd.macd_signal()
+        macd = ta.trend.MACD(df["close"])
 
-    resistance = high.rolling(20).max().iloc[-2]
+        df["macd"] = macd.macd()
+        df["macd_signal"] = macd.macd_signal()
 
-    return {
-        "close": close.iloc[-1],
-        "ema20": ema20.iloc[-1],
-        "rsi": rsi.iloc[-1],
-        "macd": macd_line.iloc[-1],
-        "signal": signal_line.iloc[-1],
-        "resistance": resistance,
-        "volume": volume.iloc[-1],
-        "avg_volume": volume.rolling(20).mean().iloc[-1]
-    }
+        price = df["close"].iloc[-1]
+        ema20 = df["ema20"].iloc[-1]
+        rsi = df["rsi"].iloc[-1]
 
+        macd_val = df["macd"].iloc[-1]
+        macd_signal = df["macd_signal"].iloc[-1]
 
-def check_conditions(data):
+        volume = df["volume"].iloc[-1]
 
-    score = 0
+        avg_volume = df["volume"].rolling(20).mean().iloc[-1]
 
-    if data["close"] > data["ema20"]:
-        score += 1
+        resistance = df["high"].rolling(20).max().iloc[-2]
 
-    if data["rsi"] > 55:
-        score += 1
+        candle_size = abs(df["close"].iloc[-1] - df["open"].iloc[-1])
 
-    if data["macd"] > data["signal"]:
-        score += 1
+        avg_candle = abs(df["close"] - df["open"]).rolling(20).mean().iloc[-1]
 
-    if data["close"] > data["resistance"]:
-        score += 1
+        # 🔥 STRONG SIGNAL
+        if price > ema20 and rsi > 50 and macd_val > macd_signal and (price > resistance or volume > avg_volume * 1.5):
 
-    if data["volume"] > data["avg_volume"] * 1.5:
-        score += 1
+            send_telegram(f"""
+🔥 STRONG SIGNAL
 
-    return score
+Coin: {symbol}
+Entry: {price}
 
+TP1: {price*1.03}
+TP2: {price*1.06}
+TP3: {price*1.10}
 
-def create_signal(symbol, price):
+SL: {price*0.96}
+""")
 
-    tp1 = price * 1.02
-    tp2 = price * 1.04
-    tp3 = price * 1.06
-    sl = price * 0.97
+        # 📈 TREND
+        elif price > ema20 and rsi > 50 and macd_val > macd_signal:
 
-    return f"""
-🚀 Crypto Signal
+            send_telegram(f"""
+📈 TREND SIGNAL
+
+Coin: {symbol}
+Entry: {price}
+
+TP1: {price*1.02}
+TP2: {price*1.04}
+TP3: {price*1.06}
+
+SL: {price*0.97}
+""")
+
+        # 🚀 BREAKOUT
+        elif price > resistance or volume > avg_volume * 1.5:
+
+            send_telegram(f"""
+🚀 BREAKOUT SIGNAL
+
+Coin: {symbol}
+Entry: {price}
+
+TP1: {price*1.03}
+TP2: {price*1.06}
+TP3: {price*1.10}
+
+SL: {price*0.96}
+""")
+
+        # 🚨 PUMP ALERT
+        elif volume > avg_volume * 2 and rsi > 55 and price > ema20:
+
+            send_telegram(f"""
+🚨 PUMP ALERT
 
 Coin: {symbol}
 
-Entry: {price}
+Price: {price}
 
-🎯 TP1: {tp1:.4f}
-🎯 TP2: {tp2:.4f}
-🎯 TP3: {tp3:.4f}
+Volume Spike Detected
+""")
 
-🛑 StopLoss: {sl:.4f}
-"""
+        # 🐋 WHALE ACTIVITY
+        elif volume > avg_volume * 3 and candle_size > avg_candle * 2:
+
+            send_telegram(f"""
+🐋 WHALE ACTIVITY DETECTED
+
+Coin: {symbol}
+
+Large Volume + Large Candle
+
+Price: {price}
+""")
+
+        # ⚡ EARLY BREAKOUT
+        elif price > resistance * 0.98 and volume > avg_volume * 1.3 and price > ema20:
+
+            send_telegram(f"""
+⚡ EARLY BREAKOUT
+
+Coin: {symbol}
+
+Price: {price}
+
+Resistance: {resistance}
+
+Possible Breakout Soon
+""")
+
+    except:
+        pass
 
 
-def send_message(text):
+def run_bot():
 
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=text)
+    send_telegram("✅ Crypto Signal Bot Started")
 
-    except Exception as e:
-        print("Telegram error:", e)
+    last_heartbeat = time.time()
+
+    while True:
+
+        for coin in coins:
+            analyze(coin)
+
+        if time.time() - last_heartbeat > 3600:
+
+            send_telegram("🤖 Bot Running Normally")
+
+            last_heartbeat = time.time()
+
+        time.sleep(300)
 
 
-send_message("✅ Signal bot started")
-
-last_hour = None
-
-while True:
-
-    now = datetime.datetime.now()
-
-    for symbol in cryptocurrencies:
-
-        data = analyze_market(symbol)
-
-        if data:
-
-            score = check_conditions(data)
-
-            if score >= 3:
-
-                msg = create_signal(symbol, data["close"])
-
-                send_message(msg)
-
-        time.sleep(2)
-
-    if now.hour != last_hour:
-
-        last_hour = now.hour
-
-        send_message("🤖 Bot running normally")
-
-    time.sleep(300)
+run_bot()
