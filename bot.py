@@ -4,46 +4,52 @@ import os
 import pandas as pd
 import ccxt
 from ta.momentum import RSIIndicator
-from ta.trend import EMAIndicator
-from ta.trend import MACD
-import telegram
+from ta.trend import EMAIndicator, MACD
+from telegram import Bot
 
 # إعدادات التليجرام
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-bot = telegram.Bot(token=TOKEN)
+bot = Bot(token=TOKEN)
 
-# قائمة العملات
+# العملات
 cryptocurrencies = [
-'BTC/USDT','ETH/USDT','BNB/USDT','SOL/USDT','XRP/USDT',
-'ADA/USDT','AVAX/USDT','DOT/USDT','MATIC/USDT','LINK/USDT',
-'ATOM/USDT','NEAR/USDT','APT/USDT','ARBUSDT','OP/USDT',
-'INJ/USDT','SUI/USDT','SEI/USDT','FTM/USDT','FIL/USDT'
+"BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT",
+"ADA/USDT","AVAX/USDT","DOT/USDT","MATIC/USDT","LINK/USDT",
+"ATOM/USDT","NEAR/USDT","APT/USDT","ARB/USDT","OP/USDT",
+"INJ/USDT","SUI/USDT","SEI/USDT","FTM/USDT","FIL/USDT"
 ]
 
-# اتصال Binance
-exchange = ccxt.binance()
+# اتصال Binance مع endpoint بديل
+exchange = ccxt.binance({
+    "enableRateLimit": True,
+    "urls": {
+        "api": {
+            "public": "https://api1.binance.com/api",
+            "private": "https://api1.binance.com/api"
+        }
+    }
+})
 
 # جلب البيانات
-def get_ohlcv(symbol, timeframe='1h', limit=100):
+def get_ohlcv(symbol, timeframe="1h", limit=100):
 
     try:
-
         bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
         df = pd.DataFrame(
             bars,
-            columns=['timestamp','open','high','low','close','volume']
+            columns=["timestamp","open","high","low","close","volume"]
         )
 
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
         return df
 
     except Exception as e:
 
-        print(f"خطأ في {symbol}", e)
+        print("خطأ", symbol, e)
 
         return None
 
@@ -56,9 +62,9 @@ def analyze_market(symbol):
     if df is None or df.empty:
         return None
 
-    close = df['close']
-    high = df['high']
-    volume = df['volume']
+    close = df["close"]
+    high = df["high"]
+    volume = df["volume"]
 
     ema20 = EMAIndicator(close=close, window=20).ema_indicator()
 
@@ -71,30 +77,25 @@ def analyze_market(symbol):
     signal_line = macd.macd_signal()
 
     last_close = close.iloc[-1]
-
     last_ema20 = ema20.iloc[-1]
-
     last_rsi = rsi.iloc[-1]
-
     last_macd = macd_line.iloc[-1]
-
     last_signal = signal_line.iloc[-1]
 
     resistance = high.rolling(20).max().iloc[-2]
 
     last_volume = volume.iloc[-1]
-
     avg_volume = volume.rolling(20).mean().iloc[-1]
 
     return {
-        'close': last_close,
-        'ema20': last_ema20,
-        'rsi': last_rsi,
-        'macd': last_macd,
-        'signal': last_signal,
-        'resistance': resistance,
-        'volume': last_volume,
-        'avg_volume': avg_volume
+        "close": last_close,
+        "ema20": last_ema20,
+        "rsi": last_rsi,
+        "macd": last_macd,
+        "signal": last_signal,
+        "resistance": resistance,
+        "volume": last_volume,
+        "avg_volume": avg_volume
     }
 
 
@@ -103,45 +104,31 @@ def check_conditions(data):
 
     conditions = []
 
-    if data['close'] > data['ema20']:
-        conditions.append('السعر فوق EMA20')
+    if data["close"] > data["ema20"]:
+        conditions.append("السعر فوق EMA20")
 
-    if data['rsi'] > 50:
-        conditions.append('RSI فوق 50')
+    if data["rsi"] > 50:
+        conditions.append("RSI فوق 50")
 
-    if data['macd'] > data['signal']:
-        conditions.append('MACD صاعد')
+    if data["macd"] > data["signal"]:
+        conditions.append("MACD صاعد")
 
-    if data['close'] > data['resistance']:
-        conditions.append('اختراق مقاومة')
+    if data["close"] > data["resistance"]:
+        conditions.append("اختراق مقاومة")
 
-    if data['volume'] > data['avg_volume'] * 1.5:
-        conditions.append('زيادة حجم التداول')
+    if data["volume"] > data["avg_volume"] * 1.5:
+        conditions.append("زيادة حجم التداول")
 
     return conditions
 
 
-# ارسال رسالة
-def send_message(text):
-
-    try:
-
-        bot.sendMessage(chat_id=CHAT_ID, text=text)
-
-    except Exception as e:
-
-        print("Telegram error", e)
-
-
-# حساب الأهداف
+# إنشاء إشارة
 def create_signal(symbol, data):
 
-    entry = data['close']
+    entry = data["close"]
 
     tp1 = entry * 1.02
-
     tp2 = entry * 1.04
-
     tp3 = entry * 1.06
 
     sl = entry * 0.97
@@ -163,6 +150,16 @@ def create_signal(symbol, data):
     return message
 
 
+# ارسال رسالة
+def send_message(text):
+
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=text)
+
+    except Exception as e:
+        print("Telegram error", e)
+
+
 # تشغيل البوت
 last_hour = None
 
@@ -172,7 +169,6 @@ while True:
 
     now = datetime.datetime.now()
 
-    # تحليل العملات
     for symbol in cryptocurrencies:
 
         data = analyze_market(symbol)
@@ -183,11 +179,10 @@ while True:
 
             if len(conditions) >= 3:
 
-                message = create_signal(symbol, data)
+                msg = create_signal(symbol, data)
 
-                send_message(message)
+                send_message(msg)
 
-    # رسالة كل ساعة
     if now.hour != last_hour:
 
         last_hour = now.hour
