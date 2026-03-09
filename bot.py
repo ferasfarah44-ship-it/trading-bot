@@ -7,7 +7,7 @@ from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator, MACD
 from telegram import Bot
 
-# إعدادات التليجرام
+# Telegram
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
@@ -21,18 +21,11 @@ cryptocurrencies = [
 "INJ/USDT","SUI/USDT","SEI/USDT","FTM/USDT","FIL/USDT"
 ]
 
-# اتصال Binance مع endpoint بديل
-exchange = ccxt.binance({
-    "enableRateLimit": True,
-    "urls": {
-        "api": {
-            "public": "https://api1.binance.com/api",
-            "private": "https://api1.binance.com/api"
-        }
-    }
+# استخدام Kucoin بدل Binance
+exchange = ccxt.kucoin({
+    "enableRateLimit": True
 })
 
-# جلب البيانات
 def get_ohlcv(symbol, timeframe="1h", limit=100):
 
     try:
@@ -48,13 +41,10 @@ def get_ohlcv(symbol, timeframe="1h", limit=100):
         return df
 
     except Exception as e:
-
         print("خطأ", symbol, e)
-
         return None
 
 
-# تحليل السوق
 def analyze_market(symbol):
 
     df = get_ohlcv(symbol)
@@ -67,103 +57,83 @@ def analyze_market(symbol):
     volume = df["volume"]
 
     ema20 = EMAIndicator(close=close, window=20).ema_indicator()
-
     rsi = RSIIndicator(close=close, window=14).rsi()
 
     macd = MACD(close=close)
 
     macd_line = macd.macd()
-
     signal_line = macd.macd_signal()
-
-    last_close = close.iloc[-1]
-    last_ema20 = ema20.iloc[-1]
-    last_rsi = rsi.iloc[-1]
-    last_macd = macd_line.iloc[-1]
-    last_signal = signal_line.iloc[-1]
 
     resistance = high.rolling(20).max().iloc[-2]
 
-    last_volume = volume.iloc[-1]
-    avg_volume = volume.rolling(20).mean().iloc[-1]
-
     return {
-        "close": last_close,
-        "ema20": last_ema20,
-        "rsi": last_rsi,
-        "macd": last_macd,
-        "signal": last_signal,
+        "close": close.iloc[-1],
+        "ema20": ema20.iloc[-1],
+        "rsi": rsi.iloc[-1],
+        "macd": macd_line.iloc[-1],
+        "signal": signal_line.iloc[-1],
         "resistance": resistance,
-        "volume": last_volume,
-        "avg_volume": avg_volume
+        "volume": volume.iloc[-1],
+        "avg_volume": volume.rolling(20).mean().iloc[-1]
     }
 
 
-# فحص الشروط
 def check_conditions(data):
 
-    conditions = []
+    score = 0
 
     if data["close"] > data["ema20"]:
-        conditions.append("السعر فوق EMA20")
+        score += 1
 
-    if data["rsi"] > 50:
-        conditions.append("RSI فوق 50")
+    if data["rsi"] > 55:
+        score += 1
 
     if data["macd"] > data["signal"]:
-        conditions.append("MACD صاعد")
+        score += 1
 
     if data["close"] > data["resistance"]:
-        conditions.append("اختراق مقاومة")
+        score += 1
 
     if data["volume"] > data["avg_volume"] * 1.5:
-        conditions.append("زيادة حجم التداول")
+        score += 1
 
-    return conditions
+    return score
 
 
-# إنشاء إشارة
-def create_signal(symbol, data):
+def create_signal(symbol, price):
 
-    entry = data["close"]
+    tp1 = price * 1.02
+    tp2 = price * 1.04
+    tp3 = price * 1.06
+    sl = price * 0.97
 
-    tp1 = entry * 1.02
-    tp2 = entry * 1.04
-    tp3 = entry * 1.06
+    return f"""
+🚀 Crypto Signal
 
-    sl = entry * 0.97
+Coin: {symbol}
 
-    message = f"""
-🚀 إشارة تداول
+Entry: {price}
 
-العملة: {symbol}
+🎯 TP1: {tp1:.4f}
+🎯 TP2: {tp2:.4f}
+🎯 TP3: {tp3:.4f}
 
-الدخول: {entry}
-
-🎯 الهدف1: {tp1}
-🎯 الهدف2: {tp2}
-🎯 الهدف3: {tp3}
-
-🛑 وقف الخسارة: {sl}
+🛑 StopLoss: {sl:.4f}
 """
 
-    return message
 
-
-# ارسال رسالة
 def send_message(text):
 
     try:
         bot.send_message(chat_id=CHAT_ID, text=text)
 
     except Exception as e:
-        print("Telegram error", e)
+        print("Telegram error:", e)
 
 
-# تشغيل البوت
+send_message("✅ Signal bot started")
+
 last_hour = None
-
-send_message("✅ تم تشغيل بوت الإشارات")
 
 while True:
 
@@ -175,18 +145,20 @@ while True:
 
         if data:
 
-            conditions = check_conditions(data)
+            score = check_conditions(data)
 
-            if len(conditions) >= 3:
+            if score >= 3:
 
-                msg = create_signal(symbol, data)
+                msg = create_signal(symbol, data["close"])
 
                 send_message(msg)
+
+        time.sleep(2)
 
     if now.hour != last_hour:
 
         last_hour = now.hour
 
-        send_message("🤖 البوت يعمل بشكل طبيعي")
+        send_message("🤖 Bot running normally")
 
     time.sleep(300)
