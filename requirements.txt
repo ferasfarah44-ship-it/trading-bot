@@ -1,1 +1,2 @@
+
 pip install ccxt pandas ta python-telegram-bot
