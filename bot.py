@@ -1,101 +1,164 @@
-import requests
 import time
-import pandas as pd
-import numpy as np
+import datetime
 import os
-from datetime import datetime
-import telegram
+import pandas as pd
+import ccxt
+from ta.momentum import RSIIndicator
+from ta.trend import EMAIndicator, MACD
+from telegram import Bot
 
-# قراءة القيم من Environment Variables في Railway
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Telegram
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-bot = telegram.Bot(token=TELEGRAM_TOKEN)
+bot = Bot(token=TOKEN)
 
-COINS = [
-    "BTCUSDT","ETHUSDT","SOLUSDT","ADAUSDT",
-    "NEARUSDT","OPUSDT","ARBUSDT","LINAUSDT",
-    "BNBUSDT","LINKUSDT","INJUSDT","FETUSDT"
+# العملات
+cryptocurrencies = [
+"BTC/USDT","ETH/USDT","BNB/USDT","SOL/USDT","XRP/USDT",
+"ADA/USDT","AVAX/USDT","DOT/USDT","MATIC/USDT","LINK/USDT",
+"ATOM/USDT","NEAR/USDT","APT/USDT","ARB/USDT","OP/USDT",
+"INJ/USDT","SUI/USDT","SEI/USDT","FTM/USDT","FIL/USDT"
 ]
 
-def get_klines(symbol):
-    url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval=15m&limit=120"
-    data = requests.get(url).json()
+# استخدام Kucoin بدل Binance
+exchange = ccxt.kucoin({
+    "enableRateLimit": True
+})
 
-    df = pd.DataFrame(data, columns=[
-        "time","open","high","low","close","volume",
-        "c1","c2","c3","c4","c5","c6"
-    ])
+def get_ohlcv(symbol, timeframe="1h", limit=100):
 
-    df["close"] = df["close"].astype(float)
-    df["volume"] = df["volume"].astype(float)
+    try:
+        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
 
-    return df
+        df = pd.DataFrame(
+            bars,
+            columns=["timestamp","open","high","low","close","volume"]
+        )
 
-def compute_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(period).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(period).mean()
-    rs = gain / loss
-    return 100 - (100 / (1 + rs))
+        df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
 
-def analyze(df):
-    df["MA20"] = df["close"].rolling(20).mean()
-    df["MA50"] = df["close"].rolling(50).mean()
-    df["RSI"] = compute_rsi(df["close"])
+        return df
 
-    last = df.iloc[-1]
+    except Exception as e:
+        print("خطأ", symbol, e)
+        return None
 
-    if last["close"] > last["MA20"] and last["close"] > last["MA50"] and last["RSI"] < 65:
-        return True, last["close"]
 
-    return False, last["close"]
+def analyze_market(symbol):
+
+    df = get_ohlcv(symbol)
+
+    if df is None or df.empty:
+        return None
+
+    close = df["close"]
+    high = df["high"]
+    volume = df["volume"]
+
+    ema20 = EMAIndicator(close=close, window=20).ema_indicator()
+    rsi = RSIIndicator(close=close, window=14).rsi()
+
+    macd = MACD(close=close)
+
+    macd_line = macd.macd()
+    signal_line = macd.macd_signal()
+
+    resistance = high.rolling(20).max().iloc[-2]
+
+    return {
+        "close": close.iloc[-1],
+        "ema20": ema20.iloc[-1],
+        "rsi": rsi.iloc[-1],
+        "macd": macd_line.iloc[-1],
+        "signal": signal_line.iloc[-1],
+        "resistance": resistance,
+        "volume": volume.iloc[-1],
+        "avg_volume": volume.rolling(20).mean().iloc[-1]
+    }
+
+
+def check_conditions(data):
+
+    score = 0
+
+    if data["close"] > data["ema20"]:
+        score += 1
+
+    if data["rsi"] > 55:
+        score += 1
+
+    if data["macd"] > data["signal"]:
+        score += 1
+
+    if data["close"] > data["resistance"]:
+        score += 1
+
+    if data["volume"] > data["avg_volume"] * 1.5:
+        score += 1
+
+    return score
+
+
+def create_signal(symbol, price):
+
+    tp1 = price * 1.02
+    tp2 = price * 1.04
+    tp3 = price * 1.06
+    sl = price * 0.97
+
+    return f"""
+🚀 Crypto Signal
+
+Coin: {symbol}
+
+Entry: {price}
+
+🎯 TP1: {tp1:.4f}
+🎯 TP2: {tp2:.4f}
+🎯 TP3: {tp3:.4f}
+
+🛑 StopLoss: {sl:.4f}
+"""
+
 
 def send_message(text):
-    bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=text)
 
-def main():
-    last_ping = 0
+    try:
+        bot.send_message(chat_id=CHAT_ID, text=text)
 
-    while True:
-        now = time.time()
+    except Exception as e:
+        print("Telegram error:", e)
 
-        if now - last_ping > 3600:
-            send_message("⚡ البوت يعمل بشكل طبيعي")
-            last_ping = now
 
-        for coin in COINS:
-            try:
-                df = get_klines(coin)
-                signal, price = analyze(df)
+send_message("✅ Signal bot started")
 
-                if signal:
-                    entry = price
-                    tp1 = round(entry * 1.02, 4)
-                    tp2 = round(entry * 1.05, 4)
-                    sl = round(entry * 0.97, 4)
+last_hour = None
 
-                    msg = f"""
-🚀 فرصة شراء قوية
+while True:
 
-العملة: {coin}
-السعر الحالي: {entry}
+    now = datetime.datetime.now()
 
-🎯 أهداف:
-TP1: {tp1}
-TP2: {tp2}
+    for symbol in cryptocurrencies:
 
-🛑 وقف الخسارة:
-SL: {sl}
+        data = analyze_market(symbol)
 
-⏰ الوقت: {datetime.now().strftime('%Y-%m-%d %H:%M')}
-"""
-                    send_message(msg)
+        if data:
 
-            except Exception as e:
-                print("Error:", e)
+            score = check_conditions(data)
 
-        time.sleep(30)
+            if score >= 3:
 
-if __name__ == "__main__":
-    main()
+                msg = create_signal(symbol, data["close"])
+
+                send_message(msg)
+
+        time.sleep(2)
+
+    if now.hour != last_hour:
+
+        last_hour = now.hour
+
+        send_message("🤖 Bot running normally")
+
+    time.sleep(300)
