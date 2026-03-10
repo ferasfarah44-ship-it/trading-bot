@@ -3,71 +3,108 @@ import datetime
 import os
 import pandas as pd
 import ccxt
-import requests
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from ta.trend import MACD
+import telegram
 
+# إعدادات التليجرام
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+bot = telegram.Bot(token=TOKEN)
+
+# العملات القوية
 cryptocurrencies = [
-'BTC/USDT','ETH/USDT','SOL/USDT','XRP/USDT','ADA/USDT',
-'AVAX/USDT','DOT/USDT','LINK/USDT','ATOM/USDT','NEAR/USDT',
-'APT/USDT','ARB/USDT','OP/USDT','INJ/USDT','SUI/USDT',
-'SEI/USDT','FTM/USDT','FIL/USDT','POL/USDT'
+
+'BTC/USDT',
+'ETH/USDT',
+'SOL/USDT',
+'XRP/USDT',
+'ADA/USDT',
+'AVAX/USDT',
+'DOT/USDT',
+'LINK/USDT',
+'ATOM/USDT',
+'NEAR/USDT',
+'APT/USDT',
+'ARB/USDT',
+'OP/USDT',
+'INJ/USDT',
+'SUI/USDT',
+'SEI/USDT',
+'FIL/USDT',
+'POL/USDT'
+
 ]
 
+# منصة التداول
 exchange = ccxt.kucoin({
 'enableRateLimit': True
 })
 
 markets = exchange.load_markets()
 
-
+# ارسال رسالة تلجرام
 def send_message(text):
 
     try:
 
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+        bot.send_message(
+            chat_id=CHAT_ID,
+            text=text
+        )
 
-        data = {
-        "chat_id": CHAT_ID,
-        "text": text
-        }
-
-        requests.post(url, data=data)
+        print("Telegram message sent")
 
     except Exception as e:
 
-        print("Telegram error:", e)
+        print("Telegram Error:", e)
 
 
+# جلب بيانات الشموع
 def get_ohlcv(symbol):
 
     try:
 
         if symbol not in markets:
-            print(symbol,"غير موجود")
+
+            print(symbol, "غير موجود")
             return None
 
-        bars = exchange.fetch_ohlcv(symbol,'1h',limit=50)
+        bars = exchange.fetch_ohlcv(
+            symbol,
+            timeframe='1h',
+            limit=50
+        )
 
         df = pd.DataFrame(
-        bars,
-        columns=['timestamp','open','high','low','close','volume']
+            bars,
+            columns=[
+                'timestamp',
+                'open',
+                'high',
+                'low',
+                'close',
+                'volume'
+            ]
+        )
+
+        df['timestamp'] = pd.to_datetime(
+            df['timestamp'],
+            unit='ms'
         )
 
         return df
 
     except Exception as e:
 
-        print("خطأ",symbol,e)
-
+        print("خطأ في", symbol, e)
         return None
 
 
-def analyze(symbol):
+# تحليل العملة
+def analyze_market(symbol):
 
     df = get_ohlcv(symbol)
 
@@ -76,84 +113,94 @@ def analyze(symbol):
 
     close = df['close']
 
-    ema20 = EMAIndicator(close=close,window=20).ema_indicator()
+    ema20 = EMAIndicator(
+        close=close,
+        window=20
+    ).ema_indicator()
 
-    rsi = RSIIndicator(close=close,window=14).rsi()
+    rsi = RSIIndicator(
+        close=close,
+        window=14
+    ).rsi()
 
     macd = MACD(close=close)
 
     macd_line = macd.macd()
     signal_line = macd.macd_signal()
 
-    data = {
+    return {
 
-    "price": close.iloc[-1],
-
-    "ema": ema20.iloc[-1],
-
-    "rsi": rsi.iloc[-1],
-
-    "macd": macd_line.iloc[-1],
-
-    "signal": signal_line.iloc[-1]
+        "close": close.iloc[-1],
+        "ema20": ema20.iloc[-1],
+        "rsi": rsi.iloc[-1],
+        "macd": macd_line.iloc[-1],
+        "signal": signal_line.iloc[-1]
 
     }
 
-    return data
 
+# شروط الاشارة
+def check_conditions(data):
 
-def check_signal(data):
+    conditions = []
 
-    score = 0
-
-    if data["price"] > data["ema"]:
-        score += 1
+    if data["close"] > data["ema20"]:
+        conditions.append("السعر فوق EMA20")
 
     if data["rsi"] > 50:
-        score += 1
+        conditions.append("RSI فوق 50")
 
     if data["macd"] > data["signal"]:
-        score += 1
+        conditions.append("MACD صاعد")
 
-    return score
+    return conditions
 
 
+# بدء البوت
 send_message("✅ Crypto Signal Bot Started")
 
 last_hour = None
+
 
 while True:
 
     now = datetime.datetime.now()
 
+    # تحليل كل 5 دقائق
     if now.minute % 5 == 0:
+
+        print("بدأ التحليل")
 
         for symbol in cryptocurrencies:
 
-            data = analyze(symbol)
+            data = analyze_market(symbol)
 
-            if data:
+            if data is None:
+                continue
 
-                score = check_signal(data)
+            conditions = check_conditions(data)
 
-                if score >= 2:
+            if len(conditions) >= 2:
 
-                    message = f"""
+                message = f"""
 🚀 فرصة تداول
 
 العملة: {symbol}
 
-السعر: {data['price']}
-RSI: {round(data['rsi'],2)}
+السعر: {data['close']}
+
+الشروط:
+{chr(10).join(conditions)}
 """
 
-                    send_message(message)
+                send_message(message)
 
             time.sleep(2)
 
         time.sleep(300)
 
 
+    # رسالة كل ساعة
     if now.hour != last_hour:
 
         last_hour = now.hour
