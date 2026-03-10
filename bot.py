@@ -3,133 +3,124 @@ import datetime
 import os
 import pandas as pd
 import ccxt
+import requests
 from ta.momentum import RSIIndicator
 from ta.trend import EMAIndicator
 from ta.trend import MACD
-import telegram
 
-# إعدادات التليجرام
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-bot = telegram.Bot(token=TOKEN)
-
-# العملات (متوافقة مع KuCoin)
 cryptocurrencies = [
-'BTC/USDT',
-'ETH/USDT',
-'SOL/USDT',
-'XRP/USDT',
-'ADA/USDT',
-'AVAX/USDT',
-'DOT/USDT',
-'LINK/USDT',
-'ATOM/USDT',
-'NEAR/USDT',
-'APT/USDT',
-'ARB/USDT',
-'OP/USDT',
-'INJ/USDT',
-'SUI/USDT',
-'SEI/USDT',
-'FTM/USDT',
-'FIL/USDT',
-'POL/USDT'
+'BTC/USDT','ETH/USDT','SOL/USDT','XRP/USDT','ADA/USDT',
+'AVAX/USDT','DOT/USDT','LINK/USDT','ATOM/USDT','NEAR/USDT',
+'APT/USDT','ARB/USDT','OP/USDT','INJ/USDT','SUI/USDT',
+'SEI/USDT','FTM/USDT','FIL/USDT','POL/USDT'
 ]
 
-# استخدام KuCoin
 exchange = ccxt.kucoin({
 'enableRateLimit': True
 })
 
 markets = exchange.load_markets()
 
-# جلب البيانات
-def get_ohlcv(symbol, timeframe='1h', limit=50):
+
+def send_message(text):
+
+    try:
+
+        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
+
+        data = {
+        "chat_id": CHAT_ID,
+        "text": text
+        }
+
+        requests.post(url, data=data)
+
+    except Exception as e:
+
+        print("Telegram error:", e)
+
+
+def get_ohlcv(symbol):
 
     try:
 
         if symbol not in markets:
-            print(symbol, "غير موجود في KuCoin")
+            print(symbol,"غير موجود")
             return None
 
-        bars = exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
+        bars = exchange.fetch_ohlcv(symbol,'1h',limit=50)
 
         df = pd.DataFrame(
-            bars,
-            columns=['timestamp','open','high','low','close','volume']
+        bars,
+        columns=['timestamp','open','high','low','close','volume']
         )
-
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
 
         return df
 
     except Exception as e:
 
-        print("خطأ في", symbol, e)
+        print("خطأ",symbol,e)
 
         return None
 
 
-# تحليل السوق
-def analyze_market(symbol):
+def analyze(symbol):
 
     df = get_ohlcv(symbol)
 
-    if df is None or df.empty:
+    if df is None:
         return None
 
     close = df['close']
 
-    ema20 = EMAIndicator(close=close, window=20).ema_indicator()
+    ema20 = EMAIndicator(close=close,window=20).ema_indicator()
 
-    rsi = RSIIndicator(close=close, window=14).rsi()
+    rsi = RSIIndicator(close=close,window=14).rsi()
 
     macd = MACD(close=close)
 
     macd_line = macd.macd()
     signal_line = macd.macd_signal()
 
-    return {
-        'close': close.iloc[-1],
-        'ema20': ema20.iloc[-1],
-        'rsi': rsi.iloc[-1],
-        'macd': macd_line.iloc[-1],
-        'signal': signal_line.iloc[-1]
+    data = {
+
+    "price": close.iloc[-1],
+
+    "ema": ema20.iloc[-1],
+
+    "rsi": rsi.iloc[-1],
+
+    "macd": macd_line.iloc[-1],
+
+    "signal": signal_line.iloc[-1]
+
     }
 
-
-# شروط الإشارة
-def check_conditions(data):
-
-    conditions = []
-
-    if data['close'] > data['ema20']:
-        conditions.append('السعر أعلى من EMA20')
-
-    if data['rsi'] > 50:
-        conditions.append('RSI أعلى من 50')
-
-    if data['macd'] > data['signal']:
-        conditions.append('MACD صاعد')
-
-    return conditions
+    return data
 
 
-# إرسال رسالة
-def send_message(text):
+def check_signal(data):
 
-    try:
-        bot.send_message(chat_id=CHAT_ID, text=text)
+    score = 0
 
-    except Exception as e:
-        print("Telegram error:", e)
+    if data["price"] > data["ema"]:
+        score += 1
 
+    if data["rsi"] > 50:
+        score += 1
 
-# الحلقة الرئيسية
-last_hour = None
+    if data["macd"] > data["signal"]:
+        score += 1
+
+    return score
+
 
 send_message("✅ Crypto Signal Bot Started")
+
+last_hour = None
 
 while True:
 
@@ -139,26 +130,24 @@ while True:
 
         for symbol in cryptocurrencies:
 
-            data = analyze_market(symbol)
+            data = analyze(symbol)
 
             if data:
 
-                conditions = check_conditions(data)
+                score = check_signal(data)
 
-                if len(conditions) >= 2:
+                if score >= 2:
 
-                    msg = f"""
+                    message = f"""
 🚀 فرصة تداول
 
 العملة: {symbol}
 
-السعر: {data['close']}
-
-الشروط:
-{chr(10).join(conditions)}
+السعر: {data['price']}
+RSI: {round(data['rsi'],2)}
 """
 
-                    send_message(msg)
+                    send_message(message)
 
             time.sleep(2)
 
