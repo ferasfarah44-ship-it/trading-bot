@@ -1,4 +1,4 @@
-pandas
 ccxt
+pandas
 ta
 python-telegram-bot
