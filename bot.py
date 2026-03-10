@@ -2,9 +2,13 @@ import requests
 import time
 import pandas as pd
 import numpy as np
+import os
 from datetime import datetime
-from config import TELEGRAM_TOKEN, TELEGRAM_CHAT_ID
 import telegram
+
+# قراءة القيم من Environment Variables في Railway
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 bot = telegram.Bot(token=TELEGRAM_TOKEN)
 
